@@ -9,13 +9,13 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.callback_answer import CallbackAnswer
 
 from .. import screens
-from ..callbacks import AddWorks, Subj, UndoWorks, WorkAct
+from ..callbacks import AddWorks, Subj, UndoWorks, WorkAct, WorkGrade
 from ..context import Ctx
-from ..logic import MAX_NAME_LEN, MAX_WORKS_PER_SUBJECT, WORK_FORMS, plural, split_names
+from ..logic import MAX_NAME_LEN, MAX_WORKS_PER_SUBJECT, WORK_FORMS, fmt_num, parse_grades, plural, split_names
 from ..models import LAB, PRAC, WORK_KINDS, Subject, Work
 from ..screens import btn, esc, works_range
 from ..states import Inp
-from .common import NOT_FOUND, Event, go_main, go_subject, handle_free_text, looks_like_grades
+from .common import HAS_LETTERS, NOT_FOUND, Event, go_main, go_subject, handle_free_text, looks_like_grades
 
 router = Router(name="works")
 
@@ -154,28 +154,102 @@ async def work_view(cq: CallbackQuery, callback_data: WorkAct, ctx: Ctx) -> None
         await _show_work(cq, ctx, work)
 
 
-@router.callback_query(WorkAct.filter(F.a == "def"))
-async def work_defend(cq: CallbackQuery, callback_data: WorkAct, ctx: Ctx, callback_answer: CallbackAnswer) -> None:
+async def _grade_screen(event: Event, ctx: Ctx, work: Work, notice: str | None = None) -> None:
+    screen = await screens.work_grade_screen(ctx.repo, ctx.user, work.id, notice)
+    if screen is None:
+        await go_main(event, ctx, notice=NOT_FOUND)
+        return
+    await ctx.mode(Inp.wgrade, sid=work.subject_id, wid=work.id)
+    await ctx.show(event, screen)
+
+
+@router.callback_query(WorkAct.filter(F.a == "pass"))
+async def work_pass(cq: CallbackQuery, callback_data: WorkAct, ctx: Ctx, callback_answer: CallbackAnswer) -> None:
+    """«Зачтено» — и сразу предложить поставить оценку (её иногда ставят, особенно за практические)."""
     work = await _work(cq, ctx, callback_data.id)
     if work is None:
         return
-    await ctx.repo.set_defended(ctx.user, work.id, True)
+    await ctx.repo.set_work_status(ctx.user, work.id, "passed")
     view = await ctx.repo.view(ctx.user, work.subject_id)
-    callback_answer.text = f"🎉 {work.short} защищена!"
-    lines = [f"🎉 <b>{esc(work.full)}</b> защищена!"]
-    if view and not view.pending:
-        lines.append("🏆 Все работы по предмету защищены!")
-    lines.append("💡 Поставили оценку? Просто отправь её сообщением.")
-    await _show_works(cq, ctx, work.subject_id, "\n".join(lines))
+    callback_answer.text = f"🎉 {work.short} — зачтено!"
+    lines = [f"🎉 <b>{esc(work.full)}</b> — зачтено!"]
+    if view and not view.open_works:
+        lines.append("🏆 Все работы по предмету зачтены!")
+    await _grade_screen(cq, ctx, work, "\n".join(lines))
 
 
-@router.callback_query(WorkAct.filter(F.a == "undef"))
-async def work_undefend(cq: CallbackQuery, callback_data: WorkAct, ctx: Ctx) -> None:
+@router.callback_query(WorkAct.filter(F.a == "fail"))
+async def work_fail(cq: CallbackQuery, callback_data: WorkAct, ctx: Ctx) -> None:
     work = await _work(cq, ctx, callback_data.id)
     if work is None:
         return
-    await ctx.repo.set_defended(ctx.user, work.id, False)
-    await _show_work(cq, ctx, work, "↩️ Отметка о защите снята.")
+    await ctx.repo.set_work_status(ctx.user, work.id, "failed")
+    await _show_works(
+        cq, ctx, work.subject_id, f"❌ <b>{esc(work.full)}</b> — не зачтено. Пересдашь — отметь «Зачтено»."
+    )
+
+
+@router.callback_query(WorkAct.filter(F.a == "unpass"))
+async def work_reset(cq: CallbackQuery, callback_data: WorkAct, ctx: Ctx) -> None:
+    work = await _work(cq, ctx, callback_data.id)
+    if work is None:
+        return
+    await ctx.repo.set_work_status(ctx.user, work.id, "pending")
+    work = await ctx.repo.get_work(ctx.user, work.id) or work
+    await _show_work(cq, ctx, work, "↩️ Отметка снята — работа снова «ещё не сдавал».")
+
+
+@router.callback_query(WorkAct.filter(F.a == "grade"))
+async def work_grade_view(cq: CallbackQuery, callback_data: WorkAct, ctx: Ctx) -> None:
+    work = await _work(cq, ctx, callback_data.id)
+    if work:
+        await _grade_screen(cq, ctx, work)
+
+
+async def _set_work_grade(event: Event, ctx: Ctx, work: Work, value: int | None) -> None:
+    before = await ctx.repo.view(ctx.user, work.subject_id)
+    await ctx.repo.set_work_grade(ctx.user, work.id, value)
+    after = await ctx.repo.view(ctx.user, work.subject_id)
+    if value is None:
+        notice = f"🗑 Оценка за «{esc(work.full)}» убрана."
+    else:
+        notice = f"🔢 <b>{esc(work.short)}</b>: оценка {value}"
+    if before and after and fmt_num(before.semester_exact) != fmt_num(after.semester_exact):
+        notice += f" · за семестр {fmt_num(before.semester_exact)} → <b>{fmt_num(after.semester_exact)}</b>"
+    await _show_works(event, ctx, work.subject_id, notice)
+
+
+@router.callback_query(WorkGrade.filter())
+async def work_grade_set(
+    cq: CallbackQuery, callback_data: WorkGrade, ctx: Ctx, callback_answer: CallbackAnswer
+) -> None:
+    work = await _work(cq, ctx, callback_data.w)
+    if work is None:
+        return
+    if callback_data.v and not ctx.user.grade_min <= callback_data.v <= ctx.user.grade_max:
+        callback_answer.text = "Такой оценки нет в твоей шкале"
+        return
+    await _set_work_grade(cq, ctx, work, callback_data.v or None)
+
+
+@router.message(Inp.wgrade, F.text)
+async def work_grade_text(message: Message, ctx: Ctx) -> None:
+    data = await ctx.data()
+    work = await _work(message, ctx, int(data.get("wid") or 0))
+    if work is None:
+        return
+    text = message.text or ""
+    if HAS_LETTERS.search(text):
+        await ctx.mode(None, sid=work.subject_id)
+        await handle_free_text(message, ctx)
+        return
+    values, bad = parse_grades(text, ctx.user.grade_min, ctx.user.grade_max)
+    if bad or len(values) != 1:
+        await _grade_screen(
+            message, ctx, work, f"⚠️ Отправь одну оценку от {ctx.user.grade_min} до {ctx.user.grade_max}."
+        )
+        return
+    await _set_work_grade(message, ctx, work, values[0])
 
 
 WORK_RENAME_TITLE = "✏️ <b>Название работы</b>"

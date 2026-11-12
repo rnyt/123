@@ -2,6 +2,8 @@
 
 from aiogram.filters.callback_data import CallbackData
 
+ACCESS_REQUEST = "acc:req"  # кнопка «Попросить доступ» у тех, кому бот закрыт
+
 
 class Nav(CallbackData, prefix="n"):
     """Переходы между общими экранами: main, stats, help, settings, ..."""
@@ -10,7 +12,7 @@ class Nav(CallbackData, prefix="n"):
 
 
 class Onb(CallbackData, prefix="ob"):
-    """Шаги знакомства: scale, next, back, reset, okr, done."""
+    """Знакомство: course, term, next, back, reset, setup, tab, tokr, tctl, tprj, dates, skip, done."""
 
     a: str
     v: int = 0
@@ -35,6 +37,21 @@ class OkrSet(CallbackData, prefix="o"):
     v: int  # оценка; 0 — убрать
 
 
+class ExamSet(CallbackData, prefix="ex"):
+    s: int
+    v: int  # отметка; 0 — убрать; 99 — «автомат» (= отметке за семестр)
+
+
+class CreditSet(CallbackData, prefix="cr"):
+    s: int
+    v: int  # 1 — зачтено, 0 — не зачтено, 2 — убрать
+
+
+class ProjSet(CallbackData, prefix="pj"):
+    s: int
+    v: int  # отметка за курсовой; 0 — убрать
+
+
 class AddWorks(CallbackData, prefix="nw"):
     s: int
     k: str  # lab | prac
@@ -43,8 +60,15 @@ class AddWorks(CallbackData, prefix="nw"):
 
 
 class WorkAct(CallbackData, prefix="w"):
+    """v — открыть, pass/fail/unpass — зачтено/не зачтено/сбросить, grade, ren, del, del_yes."""
+
     a: str
     id: int
+
+
+class WorkGrade(CallbackData, prefix="wg"):
+    w: int
+    v: int  # 0 — убрать оценку
 
 
 class DelGrade(CallbackData, prefix="dg"):
@@ -54,7 +78,7 @@ class DelGrade(CallbackData, prefix="dg"):
 
 
 class UndoGrades(CallbackData, prefix="ug"):
-    s: int
+    s: int  # 0 — оценки в нескольких предметах
     a: int  # первый id
     b: int  # последний id
 
@@ -65,6 +89,7 @@ class UndoDelGrade(CallbackData, prefix="ud"):
     o: int  # номер ОКР или 0
     t: int  # когда была поставлена
     p: int = 0
+    w: int = 0  # работа, если это оценка за работу
 
 
 class UndoOkr(CallbackData, prefix="uo"):
@@ -88,7 +113,7 @@ class Pick(CallbackData, prefix="qp"):
 
 
 class Rem(CallbackData, prefix="r"):
-    a: str  # every | time | sun | custom | test
+    a: str  # every | time | sun | works | custom | test
     v: int = 0
 
 
@@ -101,6 +126,28 @@ class ScaleSet(CallbackData, prefix="sc"):
     v: int = 0
 
 
-class Sem(CallbackData, prefix="sm"):
-    a: str  # list | new | new_yes | copy | fresh | view
+class CalcSet(CallbackData, prefix="cm"):
+    a: str  # sem | fin
+    v: int
+
+
+class SemSet(CallbackData, prefix="ss"):
+    """Настройки текущего семестра: course, term, session, holidays, ask."""
+
+    a: str
+    v: int = 0
+
+
+class Arch(CallbackData, prefix="ar"):
+    """Архив: list, view, ask, yes, later, never, copy, fresh."""
+
+    a: str
     id: int = 0
+
+
+class Adm(CallbackData, prefix="ad"):
+    """Админка: main, add, users, user, revoke, revoke_yes, unlist, requests, ok, no, open."""
+
+    a: str
+    id: int = 0
+    p: int = 0

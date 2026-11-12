@@ -2,9 +2,9 @@
 
 from aiogram import Router
 
-from . import menu, settings, start, subjects, text, works
+from . import admin, menu, session, settings, start, subjects, text, works
 
-ORDER = (start, menu, subjects, works, settings, text)
+ORDER = (admin, start, menu, session, subjects, works, settings, text)
 
 
 def build_router() -> Router:

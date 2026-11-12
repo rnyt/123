@@ -6,13 +6,13 @@ import logging
 from contextlib import suppress
 
 from aiogram import Bot, Dispatcher
-from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import BaseStorage
 from aiogram.fsm.storage.memory import SimpleEventIsolation
-from aiogram.types import BotCommand, ErrorEvent
+from aiogram.types import ErrorEvent
 from aiogram.utils.callback_answer import CallbackAnswerMiddleware
 
+from .access import Access
 from .callbacks import Nav
 from .handlers import build_router
 from .middlewares import ContextMiddleware
@@ -22,19 +22,6 @@ from .screens import Screen, btn, markup
 
 log = logging.getLogger(__name__)
 
-COMMANDS = [
-    BotCommand(command="menu", description="🏠 Главное меню"),
-    BotCommand(command="stats", description="📊 Статистика"),
-    BotCommand(command="settings", description="⚙️ Настройки"),
-    BotCommand(command="help", description="❓ Как пользоваться"),
-]
-
-DESCRIPTION = (
-    "Слежу за средним баллом, обязательными контрольными (ОКР) и защитой лабораторных "
-    "и практических. Сразу покажу, где ты не аттестован, и напомню внести новые оценки.\n\n"
-    "Нажми «Старт» 👇"
-)
-SHORT_DESCRIPTION = "Средний балл, ОКР, лабораторные и аттестация — в одном чате."
 ERROR_TEXT = "⚠️ Ой, что-то пошло не так. Попробуй ещё раз — или открой меню."
 
 
@@ -71,24 +58,16 @@ async def on_error(
     return True
 
 
-def build_dispatcher(repo: Repo, storage: BaseStorage, allowed_users: frozenset[int] = frozenset()) -> Dispatcher:
+def build_dispatcher(repo: Repo, storage: BaseStorage, access: Access | None = None) -> Dispatcher:
     panel = Panel(repo)
+    access = access or Access(repo)
     # Апдейты одного пользователя — строго по очереди: быстрые нажатия не мешают друг другу.
     dp = Dispatcher(storage=storage, events_isolation=SimpleEventIsolation())
     dp["repo"] = repo
     dp["panel"] = panel
-    dp.update.outer_middleware(ContextMiddleware(repo, panel, allowed_users))
+    dp["access"] = access
+    dp.update.outer_middleware(ContextMiddleware(repo, panel, access))
     dp.callback_query.middleware(CallbackAnswerMiddleware())
     dp.include_router(build_router())
     dp.errors.register(on_error)
     return dp
-
-
-async def setup_bot_profile(bot: Bot) -> None:
-    """Команды в меню Telegram и описание бота (не критично, если не получится)."""
-    with suppress(TelegramAPIError):
-        await bot.set_my_commands(COMMANDS)
-    with suppress(TelegramAPIError):
-        await bot.set_my_description(DESCRIPTION)
-    with suppress(TelegramAPIError):
-        await bot.set_my_short_description(SHORT_DESCRIPTION)

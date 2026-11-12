@@ -34,7 +34,7 @@ async def nav_stats(cq: CallbackQuery, ctx: Ctx) -> None:
 @router.callback_query(Nav.filter(F.to == "help"))
 async def nav_help(cq: CallbackQuery, ctx: Ctx) -> None:
     await ctx.mode()
-    await ctx.show(cq, screens.help_screen(ctx.user))
+    await ctx.show(cq, screens.help_screen(ctx.user, ctx.is_owner))
 
 
 ADD_SUBJECTS_TITLE = "➕ <b>Новые предметы</b>"

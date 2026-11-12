@@ -8,36 +8,51 @@ import random
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
 
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from . import clock
 from .callbacks import (
+    ACCESS_REQUEST,
     AddGrade,
     AddWorks,
+    Adm,
+    Arch,
+    CalcSet,
+    CreditSet,
     DelGrade,
+    ExamSet,
     Nav,
     OkrSet,
     Onb,
     Pick,
+    ProjSet,
     Rem,
     ScaleSet,
-    Sem,
+    SemSet,
     Subj,
     TzSet,
     WorkAct,
+    WorkGrade,
 )
+from .dates import fmt_day, fmt_range, in_range, phase
 from .logic import (
+    ADMISSION_KINDS,
+    DAY_FORMS,
     GRADE_FORMS,
     SUBJECT_FORMS,
     WORK_FORMS,
     Overview,
     SubjectView,
+    ago,
     display_name,
     fmt_date,
     fmt_num,
     fmt_time,
+    local_dt,
+    mean,
     plural,
     progress_bar,
     remind_every_label,
@@ -46,42 +61,35 @@ from .logic import (
     subject_icon,
     truncate,
 )
-from .models import LAB, WORK_ICON, Subject, User, Work
+from .models import (
+    CALC_MEAN,
+    CALC_SSO,
+    CONTROL_ICON,
+    CONTROL_LABEL,
+    CONTROLS,
+    CREDIT,
+    DIFF,
+    EXAM,
+    FINAL_AVG,
+    FINAL_EXAM,
+    LAB,
+    NONE,
+    WORK_ICON,
+    Semester,
+    Subject,
+    User,
+    Work,
+)
 from .repo import Repo
 
 Row = list[InlineKeyboardButton]
 
-
-@dataclass(frozen=True, slots=True)
-class Examples:
-    """Примеры оценок для подсказок — под шкалу пользователя (на 5-балльной «8 9» не бывает)."""
-
-    a: int
-    b: int
-    c: int
-    okr: int
-
-
-def ex(user: User) -> Examples:
-    return Examples(4, 5, 3, 4) if user.scale <= 5 else Examples(8, 9, 10, 7)
-
-
-def tips(user: User) -> list[str]:
-    e = ex(user)
-    return [
-        f"Пиши прямо в чат: «физ {e.a} {e.b}» — оценки сразу попадут в физику.",
-        f"Отправь просто «{e.a} {e.b}» — я спрошу, в какой предмет их записать.",
-        "Названия можно сокращать: «матан», «англ», «оаип» — я пойму.",
-        f"«физ окр {e.okr}» — так быстро ставится оценка за ОКР.",
-        f"Оценки за весь день — одним сообщением: «физ {e.a}, матан {e.b}».",
-        "Ошибся? Сразу после добавления есть кнопка «↩️ Отменить».",
-        "В карточке предмета видно, сколько оценок нужно до следующего балла.",
-        "Время и частоту напоминаний можно поменять в ⚙️ Настройках.",
-        "Закончился семестр? ⚙️ → 🗂 Семестры: старый уйдёт в архив.",
-        "Своя иконка предмета: поставь эмодзи в начало названия — «🧮 Матан».",
-        "Все оценки можно выгрузить в Excel: ⚙️ → 📤 Экспорт.",
-    ]
-
+CONTROL_DATIVE = {EXAM: "экзамену", DIFF: "диф. зачёту", CREDIT: "зачёту"}
+CONTROL_FORMS = {
+    EXAM: ("экзамен", "экзамена", "экзаменов"),
+    DIFF: ("диф. зачёт", "диф. зачёта", "диф. зачётов"),
+    CREDIT: ("зачёт", "зачёта", "зачётов"),
+}
 
 TZ_CHOICES: list[tuple[str, str]] = [
     ("Минск", "Europe/Minsk"),
@@ -103,9 +111,8 @@ TZ_CHOICES: list[tuple[str, str]] = [
 
 REMIND_TIMES = ["17:00", "18:00", "19:00", "20:00", "21:00", "22:00"]
 EDIT_PAGE = 24
-
-
 TELEGRAM_LIMIT = 4096
+SETUP_TABS = ("📌 ОКР", "🎓 Экзамены", "📐 Курсовые")
 
 
 @dataclass(slots=True)
@@ -128,6 +135,42 @@ def fit(text: str, limit: int = TELEGRAM_LIMIT - 96) -> str:
     if result.count("<pre>") > result.count("</pre>"):
         result += "</pre>"
     return result + "\n…"
+
+
+# ---------------------------------------------------------------- примеры под шкалу
+
+
+@dataclass(frozen=True, slots=True)
+class Examples:
+    """Примеры оценок для подсказок — под шкалу пользователя (на 5-балльной «8 9» не бывает)."""
+
+    a: int
+    b: int
+    c: int
+    okr: int
+    glued: str
+
+
+def ex(user: User) -> Examples:
+    return Examples(4, 5, 3, 4, "4545") if user.scale <= 5 else Examples(8, 9, 10, 7, "10910")
+
+
+def tips(user: User) -> list[str]:
+    e = ex(user)
+    return [
+        f"Пиши прямо в чат: «физ {e.a} {e.b}» — оценки сразу попадут в физику.",
+        f"Отправь просто «{e.a} {e.b}» — я спрошу, в какой предмет их записать.",
+        f"Можно без пробелов: «физра {e.glued}» — я сам разделю оценки.",
+        "Названия можно сокращать: «матан», «англ», «оаип», а своё сокращение задать в ⚙️ предмета.",
+        f"«физ окр {e.okr}» — так быстро ставится оценка за ОКР.",
+        f"Оценки за весь день — одним сообщением, каждый предмет с новой строки: «физ {e.a}» ⏎ «матан {e.b}».",
+        "Ошибся? Сразу после добавления есть кнопка «↩️ Отменить».",
+        "В карточке предмета видно, сколько оценок нужно до следующего балла.",
+        "Перед экзаменом в карточке видно, какой выйдет итог при каждой отметке.",
+        "Время и частоту напоминаний можно поменять в ⚙️ Настройках.",
+        "После сессии я предложу отправить семестр в 🗂 Архив.",
+        "Все оценки можно выгрузить в Excel: ⚙️ → 📤 Экспорт.",
+    ]
 
 
 # ---------------------------------------------------------------- helpers
@@ -172,8 +215,7 @@ def mark(selected: bool, text: str) -> str:
 def keypad(user: User, make: type[CallbackData] | None = None, **fields: int) -> list[Row]:
     """Клавиатура оценок: 1–10 в два ряда или 2–5 в один."""
     if user.scale <= 5:
-        values = list(range(2, user.scale + 1))
-        rows = [values]
+        rows = [list(range(2, user.scale + 1))]
     else:
         values = list(range(1, user.scale + 1))
         half = math.ceil(len(values) / 2)
@@ -206,46 +248,119 @@ def works_range(works: Sequence[Work]) -> str:
 
 
 def subject_title(v: SubjectView) -> str:
-    return f"{v.icon} {esc(v.name)}"
+    return f"{v.icon} {esc(v.title)}"
+
+
+def today_for(user: User) -> date:
+    return local_dt(clock.now(), user.tz).date()
+
+
+def value_label(v: SubjectView) -> str:
+    """Что писать на кнопке предмета: итог, «зачтено» или текущая отметка за семестр."""
+    final = v.final
+    if final is not None and final.kind == "grade" and v.has_session:
+        return f"итог {final.value}"
+    if final is not None and final.kind == "pass":
+        return "зачтено"
+    return fmt_num(v.semester_exact)
+
+
+def subject_button(v: SubjectView, data: CallbackData) -> InlineKeyboardButton:
+    return btn(f"{v.icon} {truncate(v.label, 22)} · {value_label(v)} {v.status_icon}", data)
 
 
 # ---------------------------------------------------------------- главное меню
 
 
+def phase_line(semester: Semester | None, today: date, previous: Semester | None = None) -> str | None:
+    if semester is None:
+        return None
+    ph = phase(today, semester.session_start, semester.session_end, semester.holidays_start, semester.holidays_end)
+    if ph.kind == "study":
+        return f"🗓 До сессии {plural(ph.days, DAY_FORMS)} ({fmt_range(semester.session_start, semester.session_end)})"
+    if ph.kind == "session":
+        left = f"ещё {plural(ph.days, DAY_FORMS)}" if ph.days else "последний день"
+        return f"📝 Идёт сессия — до {fmt_day(semester.session_end)} ({left})"
+    if ph.kind == "holidays":
+        return f"🏖 Каникулы до {fmt_day(ph.until)}"
+    if ph.kind == "after":
+        return f"✅ Сессия закончилась {fmt_day(semester.session_end)}"
+    if previous is not None and in_range(today, previous.holidays_start, previous.holidays_end):
+        return f"🏖 Каникулы до {fmt_day(previous.holidays_end)}"
+    return None
+
+
+def _session_block(ov: Overview) -> list[str]:
+    session = ov.session_views
+    if not session:
+        return []
+    counts = Counter(v.control for v in session)
+    kinds = [plural(counts[c], CONTROL_FORMS[c]) for c in (EXAM, DIFF, CREDIT) if counts[c]]
+    lines = ["🎓 Сессия: " + ", ".join(kinds)]
+    done = ov.session_done
+    if done or ov.debts:
+        line = f"🏁 Сдано: {len(done)} из {len(session)}"
+        if ov.session_avg is not None:
+            line += f" · средний сессии {fmt_num(ov.session_avg)}"
+        lines.append(line)
+    else:
+        admitted = sum(1 for v in session if v.admitted)
+        lines.append(f"🎫 Допуск есть: {admitted} из {len(session)}")
+    if ov.debts:
+        lines.append(
+            "🆘 Задолженности: " + ", ".join(f"{esc(v.label)} ({esc(v.final.note)})" for v in ov.debts if v.final)
+        )
+    if ov.session_complete and not ov.debts:
+        lines.append("🎉 Все экзамены и зачёты сданы!")
+    return lines
+
+
 def _attestation_block(user: User, ov: Overview) -> list[str]:
-    failing = ov.failing
+    failing = [v for v in ov.views if any(p.kind in ADMISSION_KINDS for p in v.problems)]
     if not failing:
-        return ["✅ <b>Аттестован по всем предметам!</b>"]
-    lines = [f"❌ <b>Не аттестован: {len(failing)} из {len(ov.views)}</b>"]
+        return ["✅ <b>Аттестован по всем предметам!</b>"] if not ov.debts else []
+    lines = [f"❌ <b>Не аттестован / нет допуска: {len(failing)} из {len(ov.views)}</b>"]
     no_okr: list[str] = []
-    low: list[str] = []
-    pending: list[str] = []
+    low_okr: list[str] = []
+    works: list[str] = []
+    project: list[str] = []
+    semester_low: list[str] = []
     for v in failing:
         missing = [p.slot for p in v.problems if p.kind == "no_okr"]
         if missing:
             suffix = "" if v.subject.okr_count <= 1 else " (№" + ", №".join(map(str, missing)) + ")"
-            no_okr.append(esc(v.name) + suffix)
+            no_okr.append(esc(v.label) + suffix)
         for p in v.problems:
             if p.kind == "okr_low":
-                low.append(f"{esc(v.name)} — {p.value}")
-            elif p.kind == "pending":
-                pending.append(f"{esc(v.name)} ({short_list([esc(w.short) for w in p.works], 3)})")
+                low_okr.append(f"{esc(v.label)} — {p.value}")
+            elif p.kind == "works":
+                works.append(f"{esc(v.label)} ({short_list([esc(w.short) for w in p.works], 3)})")
+            elif p.kind == "project_missing":
+                project.append(esc(v.label))
+            elif p.kind == "project_low":
+                project.append(f"{esc(v.label)} — {p.value}")
+            elif p.kind == "semester_low":
+                semester_low.append(f"{esc(v.label)} — {p.value}")
     if no_okr:
         lines.append("📌 Нет ОКР: " + ", ".join(no_okr))
-    if low:
-        lines.append(f"📉 ОКР ниже {user.pass_mark}: " + ", ".join(low))
-    if pending:
-        lines.append("⏳ Не защищены: " + "; ".join(pending))
+    if low_okr:
+        lines.append(f"📉 ОКР ниже {user.pass_mark}: " + ", ".join(low_okr))
+    if works:
+        lines.append("⏳ Не зачтены работы: " + "; ".join(works))
+    if project:
+        lines.append("📐 Курсовой не защищён: " + ", ".join(project))
+    if semester_low:
+        lines.append(f"📉 За семестр ниже {user.pass_mark}: " + ", ".join(semester_low))
     return lines
 
 
 def _trend_line(ov: Overview) -> str | None:
-    """«📈 За неделю: +3 оценки · средний ▲0,15»."""
+    """«🗓 За неделю: +3 оценки · средний ▲0,15»."""
     week_ago = clock.now() - 7 * 86400
     fresh = ov.added_since(week_ago)
     if not fresh:
         return None
-    line = f"🗓 За неделю: +{plural(fresh, GRADE_FORMS)}"
+    line = f"📆 За неделю: +{plural(fresh, GRADE_FORMS)}"
     before = ov.avg_before(week_ago)
     if before is not None and ov.avg is not None and abs(ov.avg - before) >= 0.005:
         arrow = "▲" if ov.avg > before else "▼"
@@ -253,16 +368,15 @@ def _trend_line(ov: Overview) -> str | None:
     return line
 
 
-def subject_button(v: SubjectView, data: CallbackData) -> InlineKeyboardButton:
-    status = "✅" if v.ok else "❌"
-    return btn(f"{v.icon} {truncate(v.name, 22)} · {fmt_num(v.avg)} {status}", data)
-
-
 async def main_screen(repo: Repo, user: User, notice: str | None = None, top_rows: Sequence[Row] = ()) -> Screen:
     views = await repo.views(user)
     semester = await repo.get_semester(user.id, user.semester_id)
+    previous = await repo.last_archived(user.id)
     ov = Overview(views)
-    lines = [f"🎓 <b>{esc(semester.title) if semester else 'Мой семестр'}</b>"]
+    lines = [f"🎓 <b>{esc(semester.label) if semester else 'Мой семестр'}</b>"]
+    when = phase_line(semester, today_for(user), previous)
+    if when:
+        lines.append(when)
     if not views:
         lines += ["", "Предметов пока нет. Нажми «➕ Предметы» и отправь их списком 👇"]
     else:
@@ -279,85 +393,120 @@ async def main_screen(repo: Repo, user: User, notice: str | None = None, top_row
             lines.append(trend)
         if ov.works_total:
             lines.append(
-                f"🔬 Защищено работ: {ov.works_done} из {ov.works_total} {progress_bar(ov.works_done, ov.works_total)}"
+                f"🔬 Зачтено работ: {ov.works_done} из {ov.works_total} {progress_bar(ov.works_done, ov.works_total)}"
             )
-        lines.append("")
-        lines += _attestation_block(user, ov)
+        session = _session_block(ov)
+        if session:
+            lines += ["", *session]
+        attestation = _attestation_block(user, ov)
+        if attestation:
+            lines += ["", *attestation]
         lines += ["", f"<i>💡 {random.choice(tips(user))}</i>"]
 
     rows: list[Row] = list(top_rows)
+    if ov.session_complete and not any(Arch(a="ask").pack() == b.callback_data for r in top_rows for b in r):
+        rows.append([btn("🗂 Архивировать семестр", Arch(a="ask"))])
     rows += adaptive_rows([subject_button(v, Subj(a="v", id=v.id)) for v in views], wide=24, narrow=0)
     rows.append([btn("➕ Предметы", Nav(to="add_subj")), btn("📊 Статистика", Nav(to="stats"))])
-    rows.append([btn("⚙️ Настройки", Nav(to="settings")), btn("❓ Помощь", Nav(to="help"))])
+    rows.append([btn("🗂 Архив", Arch(a="list")), btn("⚙️ Настройки", Nav(to="settings"))])
+    rows.append([btn("❓ Помощь", Nav(to="help"))])
     return Screen(with_notice(notice, lines), markup(rows))
 
 
 # ---------------------------------------------------------------- знакомство
 
 
-def onboarding_scale(user: User, notice: str | None = None) -> Screen:
+def onboarding_course(user: User, semester: Semester | None, notice: str | None = None) -> Screen:
     first = esc(user.name.split()[0]) if user.name.strip() else ""
+    term = semester.term if semester and semester.term else 1
     lines = [
-        f"👋 Привет{', ' + first if first else ''}! Я помогу следить за учёбой:",
-        "• средний балл по каждому предмету и общий;",
-        "• обязательные контрольные (ОКР) и защита лабораторных и практических;",
-        "• аттестация — сразу видно, где проблемы;",
-        "• напоминания внести новые оценки.",
+        f"👋 Привет{', ' + first if first else ''}! Я помогу следить за учёбой в колледже:",
+        "• средний балл и отметка за семестр — по правилам ССО;",
+        "• ОКР, лабораторные и практические, курсовые проекты;",
+        "• допуск к экзаменам и итог по экзаменам и зачётам;",
+        "• напоминания внести оценки и защитить работы.",
         "",
-        "<b>Шаг 1 из 3.</b> Какая у тебя шкала оценок?",
+        "<b>Шаг 1 из 4.</b> На каком ты курсе? Семестр я угадал по дате — поправь, если нужно.",
     ]
     rows = [
-        [btn("🔟 10-балльная (1–10)", Onb(a="scale", v=10))],
-        [btn("5️⃣ 5-балльная (2–5)", Onb(a="scale", v=5))],
+        [btn(mark(term == 1, "1 семестр"), Onb(a="term", v=1)), btn(mark(term == 2, "2 семестр"), Onb(a="term", v=2))],
+        [btn(f"{c} курс", Onb(a="course", v=c)) for c in (1, 2, 3, 4)],
     ]
     return Screen(with_notice(notice, lines), markup(rows))
 
 
 async def onboarding_subjects(repo: Repo, user: User, notice: str | None = None) -> Screen:
     subjects = await repo.list_subjects(user.id, user.semester_id)
-    step = "" if user.onboarded else "<b>Шаг 2 из 3.</b> "
+    step = "" if user.onboarded else "<b>Шаг 2 из 4.</b> "
     lines = [
-        f"{step}Отправь список своих предметов — через запятую или каждый с новой строки.",
+        f"{step}Отправь список предметов этого семестра — через запятую или каждый с новой строки.",
         "",
         "Например:",
-        "<code>Высшая математика, Физика, Программирование, Английский язык, История</code>",
+        "<code>Высшая математика, Физика, Основы алгоритмизации и программирования (ОАиП)</code>",
+        "",
+        "В скобках можно сразу указать сокращение — его удобно писать при быстром вводе.",
     ]
     if subjects:
         lines += ["", f"<b>Добавлено ({len(subjects)}):</b>"]
-        lines += [f"{subject_icon(s.name)} {esc(display_name(s.name))}" for s in subjects]
+        lines += [
+            f"{subject_icon(s.name)} {esc(display_name(s.name))}" + (f" ({esc(s.short)})" if s.short else "")
+            for s in subjects
+        ]
         lines += ["", "Можно отправить ещё или нажать «Дальше ➡️»."]
     rows: list[Row] = []
     if subjects:
-        rows.append([btn("Дальше ➡️", Onb(a="next"))])
+        rows.append([btn("Дальше ➡️", Onb(a="setup"))])
         rows.append([btn("🗑 Очистить список", Onb(a="reset"))])
-    if not user.onboarded:
-        rows.append([btn("⬅️ Назад", Onb(a="back"))])
-    else:
-        rows.append([btn("⬅️ Меню", Nav(to="main"))])
+    rows.append([btn("⬅️ Назад", Onb(a="back") if not user.onboarded else Nav(to="main"))])
     return Screen(with_notice(notice, lines), markup(rows))
 
 
-async def onboarding_okr(repo: Repo, user: User, notice: str | None = None) -> Screen:
+async def onboarding_setup(repo: Repo, user: User, tab: int = 0, notice: str | None = None) -> Screen:
     subjects = await repo.list_subjects(user.id, user.semester_id)
-    step = "" if user.onboarded else "<b>Шаг 3 из 3.</b> "
-    lines = [
-        f"{step}В каких предметах есть <b>обязательная контрольная работа (ОКР)</b>?",
-        "",
-        "Без оценки за ОКР — не аттестован, поэтому я буду за этим следить.",
-        "Нажимай на предметы, чтобы переключить. Если ОКР несколько — это настраивается в ⚙️ предмета.",
-    ]
-    rows = [
-        [
-            btn(
-                f"{'📌' if s.okr_count else '▫️'} {truncate(display_name(s.name), 24)} — "
-                f"{'есть ОКР' if s.okr_count else 'без ОКР'}",
-                Onb(a="okr", v=s.id),
-            )
-        ]
-        for s in subjects
-    ]
-    rows.append([btn("✅ Готово", Onb(a="done"))])
+    step = "" if user.onboarded else "<b>Шаг 3 из 4.</b> "
+    hints = (
+        "Где есть <b>обязательная контрольная работа (ОКР)</b>? Без оценки за ОКР — «не аттестован». "
+        "Если ОКР несколько — это настраивается в ⚙️ предмета.",
+        "Чем заканчивается предмет? Нажимай по кругу: <b>экзамен → диф. зачёт → зачёт → без экзамена</b>.",
+        "Где есть <b>курсовой проект (курсовая работа)</b>? Он оценивается отдельно и нужен для допуска (от 3).",
+    )
+    lines = [f"{step}Что есть в предметах? Переключай вкладки и нажимай на предметы.", "", hints[tab]]
+    rows: list[Row] = [[btn(mark(i == tab, title), Onb(a="tab", v=i)) for i, title in enumerate(SETUP_TABS)]]
+    for s in subjects:
+        name = truncate(s.short or display_name(s.name), 24)
+        if tab == 0:
+            label = f"{'📌' if s.okr_count else '▫️'} {name} — {'есть ОКР' if s.okr_count else 'без ОКР'}"
+            rows.append([btn(label, Onb(a="tokr", v=s.id))])
+        elif tab == 1:
+            control = s.control if s.control in CONTROLS else NONE
+            rows.append([btn(f"{CONTROL_ICON[control]} {name} — {CONTROL_LABEL[control]}", Onb(a="tctl", v=s.id))])
+        else:
+            label = f"{'📐' if s.project else '▫️'} {name} — {'курсовой' if s.project else 'нет'}"
+            rows.append([btn(label, Onb(a="tprj", v=s.id))])
+    rows.append([btn("Дальше ➡️", Onb(a="dates"))])
     rows.append([btn("⬅️ Назад", Onb(a="subjects"))])
+    return Screen(with_notice(notice, lines), markup(rows))
+
+
+def onboarding_dates(which: str, notice: str | None = None, from_settings: bool = False, step: bool = True) -> Screen:
+    step_label = "<b>Шаг 4 из 4.</b> " if step and not from_settings else ""
+    if which == "session":
+        lines = [
+            f"{step_label}Когда сессия? Отправь даты, например:",
+            "<code>22.12–14.01</code> или <code>22 декабря – 14 января</code>",
+            "",
+            "Я покажу, сколько осталось до сессии, а когда она закончится — предложу отправить семестр в архив.",
+        ]
+    else:
+        lines = [
+            f"{step_label}А каникулы когда? Например: <code>15.01–08.02</code>",
+            "",
+            "На каникулах я не беспокою напоминаниями.",
+        ]
+    if from_settings:
+        rows = [[btn("🗑 Убрать даты", SemSet(a=f"clear_{which}"))], [btn("⬅️ Назад", Nav(to="sem"))]]
+    else:
+        rows = [[btn("Пропустить ➡️", Onb(a="skip"))]]
     return Screen(with_notice(notice, lines), markup(rows))
 
 
@@ -366,7 +515,7 @@ async def onboarding_okr(repo: Repo, user: User, notice: str | None = None) -> S
 
 def _okr_lines(user: User, v: SubjectView) -> list[str]:
     if v.subject.okr_count == 0:
-        return ["📌 ОКР: не предусмотрена"]
+        return []
     parts = []
     for slot, grade in v.okr_slots:
         prefix = "" if v.subject.okr_count == 1 else f"№{slot} — "
@@ -375,8 +524,69 @@ def _okr_lines(user: User, v: SubjectView) -> list[str]:
         elif grade.value >= user.pass_mark:
             parts.append(f"{prefix}<b>{grade.value}</b> ✅")
         else:
-            parts.append(f"{prefix}<b>{grade.value}</b> ❌ (нужно от {user.pass_mark})")
+            parts.append(f"{prefix}<b>{grade.value}</b> ❌ (пересдача, нужно от {user.pass_mark})")
     return ["📌 ОКР: " + " · ".join(parts)]
+
+
+def _works_lines(v: SubjectView) -> list[str]:
+    lines = []
+    for title, works in (("🔬 Лабораторные", v.labs), ("🛠 Практические", v.pracs)):
+        if not works:
+            continue
+        done = sum(w.passed for w in works)
+        grades = [v.work_grades[w.id].value for w in works if w.id in v.work_grades]
+        extra = f" · оценки: {', '.join(map(str, grades))}" if grades else ""
+        lines.append(f"{title}: зачтено {done} из {len(works)} {progress_bar(done, len(works))}{extra}")
+    pending = [w for w in v.open_works if not w.failed]
+    failed = [w for w in v.open_works if w.failed]
+    parts = []
+    if pending:
+        parts.append("⏳ осталось: " + short_list([esc(w.short) for w in pending], 5))
+    if failed:
+        parts.append("❌ не зачтено: " + short_list([esc(w.short) for w in failed], 5))
+    if parts:
+        lines.append(" · ".join(parts))
+    return lines
+
+
+def _project_line(user: User, v: SubjectView) -> str | None:
+    if not v.subject.project:
+        return None
+    grade = v.subject.project_grade
+    if grade is None:
+        return "📐 Курсовой проект: не защищён ❌"
+    if grade < user.pass_mark:
+        return f"📐 Курсовой проект: <b>{grade}</b> ❌ (новое задание, нужно от {user.pass_mark})"
+    return f"📐 Курсовой проект: <b>{grade}</b> ✅"
+
+
+def _exam_lines(user: User, v: SubjectView) -> list[str]:
+    control = v.control
+    icon, label = CONTROL_ICON[control], CONTROL_LABEL[control].capitalize()
+    if control == CREDIT:
+        if v.subject.credit is None:
+            return [f"{icon} {label}: ещё не сдан"]
+        return [f"{icon} {label}: " + ("<b>зачтено</b> ✅" if v.subject.credit else "<b>не зачтено</b> ❌")]
+    exam = v.subject.exam_grade
+    if exam is None:
+        lines = [f"{icon} {label}: ещё не сдан"]
+        table = v.exam_table()
+        if table and v.admitted:
+            lines.append("    Итог при отметке: " + " · ".join(_table_cell(lo, hi, res) for lo, hi, res in table))
+        if v.can_exempt:
+            lines.append("    🎉 За семестр 9+ — можно получить освобождение от экзамена (п. 20 Правил).")
+        return lines
+    if exam < user.pass_mark:
+        return [f"{icon} {label}: <b>{exam}</b> ❌ — пересдача"]
+    final = v.final
+    if final is not None and final.kind == "grade":
+        note = f" ({esc(final.note)})" if user.final_mode == FINAL_AVG and v.semester_grade is not None else ""
+        return [f"{icon} {label}: <b>{exam}</b> → итог <b>{final.value}</b>{note}"]
+    return [f"{icon} {label}: <b>{exam}</b>"]
+
+
+def _table_cell(lo: int, hi: int, result: int) -> str:
+    return f"{lo}→{result}" if lo == hi else f"{lo}–{hi}→{result}"
 
 
 def _goal_line(v: SubjectView) -> str | None:
@@ -384,50 +594,77 @@ def _goal_line(v: SubjectView) -> str | None:
     if goal is None or not goal.options:
         return None
     variants = " или ".join(f"{count} × {grade}" for grade, count in goal.options)
-    return f"📈 До «{goal.target}» не хватает: {variants}"
+    return f"📈 До «{goal.target}» за семестр не хватает: {variants}"
+
+
+def status_lines(user: User, v: SubjectView) -> list[str]:
+    final = v.final
+    if final is not None and final.kind == "debt":
+        return [
+            f"🆘 <b>Задолженность:</b> {esc(final.note)} — нужна пересдача.",
+            "<i>Ликвидировать — не позднее месяца после начала следующего семестра (п. 26 Правил).</i>",
+        ]
+    if final is not None and final.kind == "pass":
+        return ["🏁 <b>Зачтено</b> ✅"]
+    if final is not None and final.kind == "grade":
+        return [f"🏁 <b>Итог за семестр: {final.value}</b>"]
+    if v.has_session:
+        dative = CONTROL_DATIVE[v.control]
+        if v.admitted:
+            return [f"🎫 <b>Допуск к {dative} есть</b> ✅"]
+        reasons = v.reasons(admission_only=True) or ["нет отметок за семестр"]
+        return [f"❌ <b>Нет допуска к {dative}:</b> " + "; ".join(esc(r) for r in reasons)]
+    if v.ok:
+        return ["✅ <b>Аттестован</b>"]
+    return ["❌ <b>Не аттестован:</b> " + "; ".join(esc(r) for r in v.reasons())]
 
 
 def render_subject(user: User, v: SubjectView, notice: str | None, top_rows: Sequence[Row]) -> Screen:
-    lines = [f"{subject_title(v)}", ""]
-    if v.avg is None:
+    lines = [subject_title(v)]
+    if v.has_session:
+        lines.append(f"<i>{CONTROL_ICON[v.control]} В сессию: {CONTROL_LABEL[v.control]}</i>")
+    lines.append("")
+    if v.semester_exact is None:
         lines.append("📊 Оценок пока нет")
     else:
         lines.append(
-            f"📊 Средний: <b>{fmt_num(v.avg)}</b> ≈ {round_half_up(v.avg)} · {plural(len(v.grades), GRADE_FORMS)}"
+            f"📊 За семестр: <b>{v.semester_grade}</b> ({fmt_num(v.semester_exact)}) · {plural(len(v.grades), GRADE_FORMS)}"
         )
+        if v.formula:
+            lines.append(f"🧮 {esc(v.formula)}")
     if v.regular:
         lines.append("📝 " + grades_line([g.value for g in v.regular]))
     lines += _okr_lines(user, v)
-    if v.labs:
-        done = sum(w.defended for w in v.labs)
-        lines.append(f"🔬 Лабораторные: {done} из {len(v.labs)} {progress_bar(done, len(v.labs))}")
-    if v.pracs:
-        done = sum(w.defended for w in v.pracs)
-        lines.append(f"🛠 Практические: {done} из {len(v.pracs)} {progress_bar(done, len(v.pracs))}")
-    if not v.works:
-        lines.append("🔬 Лабораторных и практических пока нет")
-    if v.pending:
-        lines.append("⏳ Не защищены: " + short_list([esc(w.short) for w in v.pending], 5))
+    lines += _works_lines(v)
+    project = _project_line(user, v)
+    if project:
+        lines.append(project)
+    if v.has_session:
+        lines += _exam_lines(user, v)
     goal = _goal_line(v)
-    if goal:
+    if goal and (v.final is None):
         lines.append(goal)
     lines.append("")
-    if v.ok:
-        lines.append("✅ <b>Аттестован</b>")
-    else:
-        lines.append("❌ <b>Не аттестован:</b> " + "; ".join(esc(r) for r in v.reasons()))
-    if v.avg_below_pass:
-        lines.append(f"⚠️ Средний ниже {user.pass_mark} — стоит подтянуть")
+    lines += status_lines(user, v)
     e = ex(user)
-    lines.append(f"<i>💡 Оценки можно просто отправить сообщением: {e.a} {e.b}</i>")
+    lines.append(f"<i>💡 Оценки можно просто отправить сообщением: {e.a} {e.b} или {e.glued}</i>")
 
     sid = v.id
     rows: list[Row] = list(top_rows)
     rows.append([btn("➕ Оценки", Subj(a="add", id=sid)), btn("📌 ОКР", Subj(a="okr", id=sid))])
     rows.append([btn("🔬 + Лабораторная", Subj(a="nwl", id=sid)), btn("🛠 + Практическая", Subj(a="nwp", id=sid))])
     if v.works:
-        done = sum(w.defended for w in v.works)
-        rows.append([btn(f"📂 Работы · защищено {done} из {len(v.works)}", Subj(a="works", id=sid))])
+        done = sum(w.passed for w in v.works)
+        rows.append([btn(f"📂 Работы · зачтено {done} из {len(v.works)}", Subj(a="works", id=sid))])
+    session_row = []
+    if v.has_session:
+        session_row.append(
+            btn(f"{CONTROL_ICON[v.control]} {CONTROL_LABEL[v.control].capitalize()}", Subj(a="exam", id=sid))
+        )
+    if v.subject.project:
+        session_row.append(btn("📐 Курсовой", Subj(a="proj", id=sid)))
+    if session_row:
+        rows.append(session_row)
     tools = []
     if v.grades:
         tools.append(btn("✏️ Изменить оценки", Subj(a="edit", id=sid)))
@@ -459,15 +696,16 @@ async def add_grades_screen(
     lines = [f"➕ <b>Оценки: {subject_title(v)}</b>", ""]
     if added:
         lines.append("✅ Только что: " + ", ".join(map(str, added)))
-        lines.append(f"📊 Средний: {fmt_num(before)} → <b>{fmt_num(v.avg)}</b>")
+        lines.append(f"📊 За семестр: {fmt_num(before)} → <b>{fmt_num(v.semester_exact)}</b>")
     else:
-        lines.append(f"📊 Средний: <b>{fmt_num(v.avg)}</b> · {plural(len(v.grades), GRADE_FORMS)}")
+        lines.append(f"📊 За семестр: <b>{fmt_num(v.semester_exact)}</b> · {plural(len(v.grades), GRADE_FORMS)}")
         if v.regular:
             lines.append("📝 Последние: " + grades_line([g.value for g in v.regular], 12))
     lines += [
         "",
         "Нажимай на оценки — каждая сохраняется сразу.",
-        f"Или отправь сообщением: <code>{e.a} {e.b} {e.c}</code>, <code>{e.a}, {e.b}</code> или <code>{e.a}/{e.b}</code>",
+        f"Или отправь сообщением: <code>{e.a} {e.b} {e.c}</code>, <code>{e.a}, {e.b}</code> или слитно "
+        f"<code>{e.glued}</code>",
     ]
     rows = keypad(user, AddGrade, s=sid)
     if added:
@@ -485,11 +723,7 @@ async def okr_screen(
     count = v.subject.okr_count
     head = f"📌 <b>ОКР: {subject_title(v)}</b>"
     if count == 0:
-        lines = [
-            head,
-            "",
-            "В этом предмете ОКР не предусмотрена — аттестация зависит только от защиты работ.",
-        ]
+        lines = [head, "", "В этом предмете ОКР не предусмотрена — аттестация зависит от работ и курсового."]
         rows = [
             [btn("📌 В предмете есть ОКР", Subj(a="okron", id=sid))],
             [btn("⬅️ Назад", Subj(a="v", id=sid))],
@@ -504,8 +738,7 @@ async def okr_screen(
             if grade is None:
                 lines.append(f"№{n} — нет оценки ❌")
             else:
-                ok = "✅" if grade.value >= user.pass_mark else "❌"
-                lines.append(f"№{n} — <b>{grade.value}</b> {ok}")
+                lines.append(f"№{n} — <b>{grade.value}</b> {'✅' if grade.value >= user.pass_mark else '❌'}")
         lines += ["", "Выбери, какую ОКР выставить:"]
         buttons = [
             btn(f"ОКР №{n} · {grade.value if grade else '—'}", Subj(a="okr", id=sid, n=n)) for n, grade in v.okr_slots
@@ -518,15 +751,23 @@ async def okr_screen(
     lines = [
         title,
         "",
-        f"Обязательная контрольная работа: без оценки от {user.pass_mark} — не аттестован.",
-        "Оценка за ОКР входит в средний балл.",
-        "",
+        f"Обязательная контрольная работа: без положительной отметки (от {user.pass_mark}) — «не аттестован».",
     ]
+    if not v.simple:
+        lines.append("В отметку за семестр ОКР входит отдельным слагаемым (п. 22 Правил).")
+    else:
+        lines.append("Оценка за ОКР входит в средний балл.")
+    if v.open_works:
+        lines.append("⚠️ К ОКР допускают, когда зачтены все лабораторные и практические.")
+    lines.append("")
     if current is None:
         lines.append("Сейчас: оценки нет ❌")
+    elif current.value >= user.pass_mark:
+        lines.append(f"Сейчас: <b>{current.value}</b> ✅")
     else:
-        ok = "✅" if current.value >= user.pass_mark else f"❌ (нужно от {user.pass_mark})"
-        lines.append(f"Сейчас: <b>{current.value}</b> {ok}")
+        lines.append(
+            f"Сейчас: <b>{current.value}</b> ❌ — пересдача в течение двух недель, новая отметка окончательная."
+        )
     lines.append("Выбери оценку или отправь её сообщением:")
     rows = keypad(user, OkrSet, s=sid, n=slot)
     if current is not None:
@@ -536,17 +777,95 @@ async def okr_screen(
     return Screen(with_notice(notice, lines), markup(rows))
 
 
+async def exam_screen(repo: Repo, user: User, sid: int, notice: str | None = None) -> Screen | None:
+    v = await repo.view(user, sid)
+    if v is None or not v.has_session:
+        return None
+    control = v.control
+    label = CONTROL_LABEL[control].capitalize()
+    lines = [f"{CONTROL_ICON[control]} <b>{label}: {subject_title(v)}</b>", ""]
+    if v.semester_exact is not None:
+        lines.append(f"📊 За семестр: <b>{v.semester_grade}</b> ({fmt_num(v.semester_exact)})")
+    if v.admitted:
+        lines.append("🎫 Допуск: ✅ есть")
+    else:
+        reasons = v.reasons(admission_only=True) or ["нет отметок за семестр"]
+        lines.append("🎫 Допуск: ❌ нет — " + "; ".join(esc(r) for r in reasons))
+
+    if control == CREDIT:
+        state = {None: "ещё не сдан", True: "<b>зачтено</b> ✅", False: "<b>не зачтено</b> ❌ — пересдача"}
+        lines += ["", f"Сейчас: {state[v.subject.credit]}"]
+        rows = [[btn("✅ Зачтено", CreditSet(s=sid, v=1)), btn("❌ Не зачтено", CreditSet(s=sid, v=0))]]
+        if v.subject.credit is not None:
+            rows.append([btn("🗑 Убрать отметку", CreditSet(s=sid, v=2))])
+        rows.append([btn("⬅️ Назад", Subj(a="v", id=sid))])
+        return Screen(with_notice(notice, lines), markup(rows))
+
+    if user.final_mode == FINAL_AVG:
+        lines.append(f"🧮 Итог = (отметка за семестр + {CONTROL_LABEL[control]}) / 2, округление по правилам: 8,5 → 9.")
+        table = v.exam_table()
+        if table:
+            lines.append("Итог при отметке: " + " · ".join(_table_cell(lo, hi, res) for lo, hi, res in table))
+    else:
+        lines.append(f"🧮 Итог = отметка за {CONTROL_LABEL[control]} (п. 20 Правил).")
+    if v.can_exempt:
+        lines.append(
+            "🎉 За семестр 9+: по п. 20 Правил преподаватель может освободить от экзамена — тогда жми «Автомат»."
+        )
+    exam = v.subject.exam_grade
+    lines.append("")
+    if exam is None:
+        lines.append("Сейчас: ещё не сдан")
+    elif exam < user.pass_mark:
+        lines.append(f"Сейчас: <b>{exam}</b> ❌ — академическая задолженность, нужна пересдача")
+    else:
+        final = v.final
+        lines.append(f"Сейчас: <b>{exam}</b> ✅" + (f" → итог <b>{final.value}</b>" if final and final.value else ""))
+    lines.append("Выбери отметку или отправь её сообщением:")
+    rows = keypad(user, ExamSet, s=sid)
+    if v.can_exempt:
+        rows.append([btn(f"🎉 Автомат (= {v.semester_grade})", ExamSet(s=sid, v=99))])
+    if exam is not None:
+        rows.append([btn("🗑 Убрать отметку", ExamSet(s=sid, v=0))])
+    rows.append([btn("⬅️ Назад", Subj(a="v", id=sid))])
+    return Screen(with_notice(notice, lines), markup(rows))
+
+
+async def project_screen(repo: Repo, user: User, sid: int, notice: str | None = None) -> Screen | None:
+    v = await repo.view(user, sid)
+    if v is None or not v.subject.project:
+        return None
+    lines = [
+        f"📐 <b>Курсовой проект: {subject_title(v)}</b>",
+        "",
+        f"Оценивается по 10-балльной шкале; для допуска к экзамену и диф. зачёту нужно от {user.pass_mark}.",
+    ]
+    if not v.simple:
+        lines.append("В отметку за семестр входит отдельным слагаемым (п. 22 Правил).")
+    lines.append(f"Ниже {user.pass_mark} — дают новое задание и срок; не сдал — «не аттестован».")
+    grade = v.subject.project_grade
+    lines.append("")
+    if grade is None:
+        lines.append("Сейчас: не защищён ❌")
+    elif grade < user.pass_mark:
+        lines.append(f"Сейчас: <b>{grade}</b> ❌ — нужно переделать")
+    else:
+        lines.append(f"Сейчас: защищён на <b>{grade}</b> ✅")
+    lines.append("Выбери отметку или отправь её сообщением:")
+    rows = keypad(user, ProjSet, s=sid)
+    if grade is not None:
+        rows.append([btn("🗑 Убрать отметку", ProjSet(s=sid, v=0))])
+    rows.append([btn("⬅️ Назад", Subj(a="v", id=sid))])
+    return Screen(with_notice(notice, lines), markup(rows))
+
+
 async def edit_grades_screen(
-    repo: Repo,
-    user: User,
-    sid: int,
-    page: int = 0,
-    notice: str | None = None,
-    top_rows: Sequence[Row] = (),
+    repo: Repo, user: User, sid: int, page: int = 0, notice: str | None = None, top_rows: Sequence[Row] = ()
 ) -> Screen | None:
     v = await repo.view(user, sid)
     if v is None:
         return None
+    works = {w.id: w for w in v.works}
     grades = list(reversed(v.grades))
     pages = max(1, math.ceil(len(grades) / EDIT_PAGE))
     page = min(max(page, 0), pages - 1)
@@ -554,15 +873,20 @@ async def edit_grades_screen(
     lines = [f"✏️ <b>Изменить оценки: {subject_title(v)}</b>", ""]
     if grades:
         lines.append("Нажми на оценку, чтобы удалить её. Сначала — новые.")
-        if any(g.is_okr for g in grades):
-            lines.append("📌 — оценка за ОКР.")
+        if any(g.is_okr or g.is_work for g in grades):
+            lines.append("📌 — ОКР, 🔬/🛠 — оценка за работу.")
     else:
         lines.append("Оценок нет.")
+
+    def marker(g) -> str:
+        if g.is_okr:
+            return "📌"
+        if g.work_id in works:
+            return WORK_ICON[works[g.work_id].kind]
+        return ""
+
     buttons = [
-        btn(
-            f"{'📌' if g.is_okr else ''}{g.value} · {fmt_date(g.created_at, user.tz)}",
-            DelGrade(id=g.id, s=sid, p=page),
-        )
+        btn(f"{marker(g)}{g.value} · {fmt_date(g.created_at, user.tz)}", DelGrade(id=g.id, s=sid, p=page))
         for g in chunk
     ]
     rows: list[Row] = list(top_rows) + chunks(buttons, 3)
@@ -582,24 +906,44 @@ async def subject_settings_screen(repo: Repo, user: User, sid: int, notice: str 
     v = await repo.view(user, sid)
     if v is None:
         return None
+    s = v.subject
     subjects = await repo.list_subjects(user.id, user.semester_id)
-    index = next((i for i, s in enumerate(subjects) if s.id == sid), 0)
-    count = v.subject.okr_count
+    index = next((i for i, x in enumerate(subjects) if x.id == sid), 0)
+    control = v.control
+    kind = "общеобразовательный — простое среднее" if s.general else "профессиональный — по п. 22 Правил"
     lines = [
         f"⚙️ <b>{subject_title(v)}</b>",
         "",
-        f"📌 ОКР в предмете: <b>{count if count else 'нет'}</b>",
+        f"{CONTROL_ICON[control]} В сессию: <b>{CONTROL_LABEL[control]}</b>",
+        f"📌 ОКР: <b>{s.okr_count if s.okr_count else 'нет'}</b>",
+        f"📐 Курсовой проект: <b>{'есть' if s.project else 'нет'}</b>",
+        f"🏷 Сокращение: <b>{esc(s.short) if s.short else 'нет'}</b>",
+    ]
+    if user.calc_mode == CALC_SSO:
+        lines.append(f"📚 Предмет: {kind}")
+    lines += [
         f"📍 Место в списке: {index + 1} из {len(subjects)}",
         "",
         "<i>Своя иконка: поставь эмодзи в начало названия, например «🧮 Матан».</i>",
     ]
-    rows = [
-        [btn("✏️ Переименовать", Subj(a="ren", id=sid))],
-        [btn(mark(count == n, "нет ОКР" if n == 0 else f"ОКР: {n}"), Subj(a="okrn", id=sid, n=n)) for n in range(0, 4)],
-        [btn("⬆️ Выше", Subj(a="up", id=sid)), btn("⬇️ Ниже", Subj(a="down", id=sid))],
-        [btn("🗑 Удалить предмет", Subj(a="del", id=sid))],
-        [btn("⬅️ Назад", Subj(a="v", id=sid))],
+    control_buttons = [
+        btn(mark(control == c, CONTROL_LABEL[c].capitalize()), Subj(a="ctl", id=sid, n=i))
+        for i, c in enumerate(CONTROLS)
     ]
+    rows = chunks(control_buttons, 2)
+    rows.append(
+        [
+            btn(mark(s.okr_count == n, "нет ОКР" if n == 0 else f"ОКР: {n}"), Subj(a="okrn", id=sid, n=n))
+            for n in range(0, 4)
+        ]
+    )
+    rows.append([btn(f"📐 Курсовой: {'есть ✅' if s.project else 'нет'}", Subj(a="prj", id=sid))])
+    rows.append([btn("🏷 Сокращение", Subj(a="short", id=sid)), btn("✏️ Переименовать", Subj(a="ren", id=sid))])
+    if user.calc_mode == CALC_SSO:
+        rows.append([btn(f"📚 Общеобразовательный: {'да ✅' if s.general else 'нет'}", Subj(a="gen", id=sid))])
+    rows.append([btn("⬆️ Выше", Subj(a="up", id=sid)), btn("⬇️ Ниже", Subj(a="down", id=sid))])
+    rows.append([btn("🗑 Удалить предмет", Subj(a="del", id=sid))])
+    rows.append([btn("⬅️ Назад", Subj(a="v", id=sid))])
     return Screen(with_notice(notice, lines), markup(rows))
 
 
@@ -610,8 +954,8 @@ async def delete_subject_screen(repo: Repo, user: User, sid: int) -> Screen | No
     lines = [
         f"🗑 <b>Удалить «{esc(v.name)}»?</b>",
         "",
-        f"Вместе с ним удалятся {plural(len(v.grades), GRADE_FORMS)} и "
-        f"{plural(len(v.works), WORK_FORMS)}. Это нельзя отменить.",
+        f"Вместе с ним удалятся {plural(len(v.grades), GRADE_FORMS)} и {plural(len(v.works), WORK_FORMS)}. "
+        "Это нельзя отменить.",
     ]
     rows = [[btn("🗑 Да, удалить", Subj(a="del_yes", id=sid)), btn("⬅️ Отмена", Subj(a="cfg", id=sid))]]
     return Screen("\n".join(lines), markup(rows))
@@ -620,8 +964,12 @@ async def delete_subject_screen(repo: Repo, user: User, sid: int) -> Screen | No
 # ---------------------------------------------------------------- работы
 
 
-def _work_buttons(works: Sequence[Work]) -> list[Row]:
-    buttons = [btn(f"{'✅' if w.defended else '⏳'} {w.short}", WorkAct(a="v", id=w.id)) for w in works]
+def _work_buttons(v: SubjectView, works: Sequence[Work]) -> list[Row]:
+    buttons = []
+    for w in works:
+        grade = v.work_grades.get(w.id)
+        suffix = f" · {grade.value}" if grade else ""
+        buttons.append(btn(f"{w.status_icon} {w.short}{suffix}", WorkAct(a="v", id=w.id)))
     return adaptive_rows(buttons, wide=18, narrow=9)
 
 
@@ -632,19 +980,21 @@ async def works_screen(
     if v is None:
         return None
     lines = [f"📂 <b>Работы: {subject_title(v)}</b>", ""]
-    if v.labs:
-        done = sum(w.defended for w in v.labs)
-        lines.append(f"🔬 Лабораторные: {done} из {len(v.labs)} {progress_bar(done, len(v.labs))}")
-    if v.pracs:
-        done = sum(w.defended for w in v.pracs)
-        lines.append(f"🛠 Практические: {done} из {len(v.pracs)} {progress_bar(done, len(v.pracs))}")
+    for title, works in (("🔬 Лабораторные", v.labs), ("🛠 Практические", v.pracs)):
+        if works:
+            done = sum(w.passed for w in works)
+            lines.append(f"{title}: зачтено {done} из {len(works)} {progress_bar(done, len(works))}")
     if v.works:
-        lines += ["", "Нажми на работу, чтобы отметить защиту.", "✅ — защищена, ⏳ — ещё нет."]
+        lines += [
+            "",
+            "Нажми на работу, чтобы отметить «зачтено» и поставить оценку.",
+            "✅ зачтено · ❌ не зачтено · ⏳ ещё нет",
+        ]
     else:
         lines.append("Работ пока нет — добавь их кнопками ниже.")
     rows: list[Row] = list(top_rows)
-    rows += _work_buttons(v.labs)
-    rows += _work_buttons(v.pracs)
+    rows += _work_buttons(v, v.labs)
+    rows += _work_buttons(v, v.pracs)
     rows.append([btn("🔬 + ЛР", Subj(a="nwl", id=sid, n=1)), btn("🛠 + ПР", Subj(a="nwp", id=sid, n=1))])
     rows.append([btn("⬅️ К предмету", Subj(a="v", id=sid))])
     return Screen(with_notice(notice, lines), markup(rows))
@@ -661,10 +1011,7 @@ async def add_works_screen(
     short = "ЛР" if kind == LAB else "ПР"
     next_num = max((w.num for w in existing), default=0) + 1
     lines = [f"{WORK_ICON[kind]} <b>Новые {word}: {subject_title(v)}</b>", ""]
-    if existing:
-        lines.append(f"Сейчас: {len(existing)} — {works_range(existing)}")
-    else:
-        lines.append("Пока нет ни одной.")
+    lines.append(f"Сейчас: {len(existing)} — {works_range(existing)}" if existing else "Пока нет ни одной.")
     lines += [
         "",
         "Сколько добавить? Номера проставлю сам.",
@@ -686,21 +1033,55 @@ async def work_screen(repo: Repo, user: User, wid: int, notice: str | None = Non
     v = await repo.view(user, work.subject_id)
     if v is None:
         return None
+    grade = v.work_grades.get(work.id)
     lines = [f"{work.icon} <b>{esc(work.full)}</b>", subject_title(v), ""]
-    if work.defended and work.defended_at:
-        lines.append(f"Статус: ✅ защищена {fmt_date(work.defended_at, user.tz)}")
+    if work.passed and work.defended_at:
+        lines.append(f"Статус: ✅ зачтено {fmt_date(work.defended_at, user.tz)}")
+    elif work.failed:
+        lines.append("Статус: ❌ не зачтено — пересдай и отметь «Зачтено»")
     else:
-        lines.append("Статус: ⏳ не защищена")
+        lines.append("Статус: ⏳ ещё не сдавал")
+    lines.append(f"Оценка: <b>{grade.value}</b> (идёт в средний)" if grade else "Оценка: нет")
     lines.append(f"Добавлена: {fmt_date(work.created_at, user.tz)}")
     back = btn("⬅️ Назад", Subj(a="works", id=v.id))
-    if work.defended:
-        first = [btn("↩️ Не защищена", WorkAct(a="undef", id=wid)), back]
+    if work.passed:
+        rows = [
+            [btn(f"🔢 Оценка: {grade.value}" if grade else "🔢 Поставить оценку", WorkAct(a="grade", id=wid)),
+             btn("↩️ Снять зачёт", WorkAct(a="unpass", id=wid))],
+            [back],
+        ]  # fmt: skip
     else:
-        first = [btn("✅ Защитил", WorkAct(a="def", id=wid)), back]
-    rows = [
-        first,
-        [btn("✏️ Название", WorkAct(a="ren", id=wid)), btn("🗑 Удалить", WorkAct(a="del", id=wid))],
+        second = (
+            btn("↩️ Сбросить", WorkAct(a="unpass", id=wid))
+            if work.failed
+            else btn("❌ Не зачтено", WorkAct(a="fail", id=wid))
+        )
+        rows = [[btn("✅ Зачтено", WorkAct(a="pass", id=wid)), second], [back]]
+    rows.append([btn("✏️ Название", WorkAct(a="ren", id=wid)), btn("🗑 Удалить", WorkAct(a="del", id=wid))])
+    return Screen(with_notice(notice, lines), markup(rows))
+
+
+async def work_grade_screen(repo: Repo, user: User, wid: int, notice: str | None = None) -> Screen | None:
+    work = await repo.get_work(user, wid)
+    if work is None:
+        return None
+    v = await repo.view(user, work.subject_id)
+    if v is None:
+        return None
+    grade = v.work_grades.get(work.id)
+    lines = [
+        f"🔢 <b>Оценка за «{esc(work.full)}»</b>",
+        subject_title(v),
+        "",
+        "Поставили оценку? Она пойдёт в средний балл предмета.",
+        "Если только «зачтено» без оценки — жми «Без оценки».",
+        "",
+        f"Сейчас: <b>{grade.value}</b>" if grade else "Сейчас: без оценки",
     ]
+    rows = keypad(user, WorkGrade, w=wid)
+    if grade:
+        rows.append([btn("🗑 Убрать оценку", WorkGrade(w=wid, v=0))])
+    rows.append([btn("Без оценки ➡️", Subj(a="works", id=v.id))])
     return Screen(with_notice(notice, lines), markup(rows))
 
 
@@ -708,12 +1089,16 @@ async def delete_work_screen(repo: Repo, user: User, wid: int) -> Screen | None:
     work = await repo.get_work(user, wid)
     if work is None:
         return None
-    lines = [f"🗑 <b>Удалить «{esc(work.full)}»?</b>", "", "Отметка о защите тоже пропадёт."]
+    lines = [f"🗑 <b>Удалить «{esc(work.full)}»?</b>", "", "Отметка о зачёте и оценка за работу тоже пропадут."]
     rows = [[btn("🗑 Да, удалить", WorkAct(a="del_yes", id=wid)), btn("⬅️ Отмена", WorkAct(a="v", id=wid))]]
     return Screen("\n".join(lines), markup(rows))
 
 
 # ---------------------------------------------------------------- быстрый ввод
+
+
+def _subject_pick_label(s: Subject) -> str:
+    return f"{subject_icon(s.name)} {truncate(s.short or display_name(s.name), 26)}"
 
 
 def pick_screen(subjects: Sequence[Subject], values: Sequence[int], okr: bool, notice: str | None = None) -> Screen:
@@ -723,19 +1108,14 @@ def pick_screen(subjects: Sequence[Subject], values: Sequence[int], okr: bool, n
         what = ("оценку " if len(values) == 1 else "оценки ") + ", ".join(map(str, values))
     lines = [f"🤔 <b>Куда записать {what}?</b>", "", "Выбери предмет:"]
     payload = "-".join(map(str, values))
-    buttons = [
-        btn(f"{subject_icon(s.name)} {truncate(display_name(s.name), 26)}", Pick(s=s.id, v=payload, o=int(okr)))
-        for s in subjects
-    ]
+    buttons = [btn(_subject_pick_label(s), Pick(s=s.id, v=payload, o=int(okr))) for s in subjects]
     rows = adaptive_rows(buttons, wide=18, narrow=0) + [[btn("✖️ Отмена", Nav(to="main"))]]
     return Screen(with_notice(notice, lines), markup(rows))
 
 
 def open_pick_screen(subjects: Sequence[Subject], query: str) -> Screen:
     lines = [f"🔎 По запросу «{esc(query)}» нашлось несколько предметов:"]
-    buttons = [
-        btn(f"{subject_icon(s.name)} {truncate(display_name(s.name), 26)}", Subj(a="v", id=s.id)) for s in subjects
-    ]
+    buttons = [btn(_subject_pick_label(s), Subj(a="v", id=s.id)) for s in subjects]
     rows = adaptive_rows(buttons, wide=18, narrow=0) + [[btn("✖️ Отмена", Nav(to="main"))]]
     return Screen("\n".join(lines), markup(rows))
 
@@ -751,7 +1131,7 @@ async def stats_screen(repo: Repo, user: User) -> Screen:
     views = await repo.views(user)
     ov = Overview(views)
     now = clock.now()
-    week = sum(1 for v in views for g in v.grades if g.created_at >= now - 7 * 86400)
+    week = ov.added_since(now - 7 * 86400)
     lines = ["📊 <b>Статистика</b>", ""]
     if not ov.grades_count:
         lines.append("Пока нет оценок — статистика появится, как только добавишь первые.")
@@ -759,14 +1139,16 @@ async def stats_screen(repo: Repo, user: User) -> Screen:
         lines.append(f"Средний балл: <b>{fmt_num(ov.avg)}</b> ≈ {round_half_up(ov.avg or 0)}")
         lines.append(f"По всем оценкам подряд: {fmt_num(ov.avg_all)}")
         lines.append(f"Оценок: {ov.grades_count} · за неделю: +{week}")
+    if ov.session_avg is not None:
+        lines.append(f"Средний балл сессии (экзамены и диф. зачёты): <b>{fmt_num(ov.session_avg)}</b>")
     if ov.works_total:
         pct = round(ov.works_done / ov.works_total * 100)
         lines.append(
-            f"Работы: {ov.works_done} из {ov.works_total} {progress_bar(ov.works_done, ov.works_total)} {pct}%"
+            f"Работы: зачтено {ov.works_done} из {ov.works_total} {progress_bar(ov.works_done, ov.works_total)} {pct}%"
         )
     if views:
         ok = len(views) - len(ov.failing)
-        lines.append(f"Аттестация: {ok} из {len(views)}" + (" 🎉" if ok == len(views) else ""))
+        lines.append(f"Без проблем: {ok} из {len(views)}" + (" 🎉" if ok == len(views) else ""))
 
     counts = Counter(value for v in views for value in v.values)
     if counts:
@@ -777,45 +1159,61 @@ async def stats_screen(repo: Repo, user: User) -> Screen:
         ]
         lines += ["", "<b>Распределение оценок</b>", "<pre>" + "\n".join(bars) + "</pre>"]
 
-    ranked = sorted((v for v in views if v.avg is not None), key=lambda v: v.avg or 0, reverse=True)
+    ranked = sorted(
+        (v for v in views if v.semester_exact is not None), key=lambda v: v.semester_exact or 0, reverse=True
+    )
     if ranked:
         medals = ["🥇", "🥈", "🥉"]
-        lines += ["", "<b>Рейтинг предметов</b>"]
+        lines += ["", "<b>Рейтинг предметов</b> (за семестр)"]
         for i, v in enumerate(ranked):
             place = medals[i] if i < 3 else f"{i + 1}."
-            lines.append(f"{place} {subject_title(v)} — {fmt_num(v.avg)}")
-    empty = [esc(v.name) for v in views if v.avg is None]
+            lines.append(f"{place} {v.icon} {esc(v.label)} — {fmt_num(v.semester_exact)}")
+    empty = [esc(v.label) for v in views if v.semester_exact is None]
     if empty:
         lines.append("Без оценок: " + ", ".join(empty))
     return Screen("\n".join(lines), markup([[btn("⬅️ Меню", Nav(to="main"))]]))
 
 
-def help_screen(user: User) -> Screen:
+def help_screen(user: User, is_owner: bool = False) -> Screen:
     e = ex(user)
     reminders = f"{remind_every_label(user.remind_every)} в {user.remind_time}" if user.remind_every else "выключены"
     lines = [
         "❓ <b>Как пользоваться</b>",
         "",
+        "<b>Команды</b>",
+        "/menu — главное меню",
+        "/stats — статистика",
+        "/archive — архив семестров",
+        "/settings — настройки",
+        "/help — эта справка",
+    ]
+    if is_owner:
+        lines.append("/apanel — админ-панель (видишь только ты)")
+    lines += [
+        "",
         "<b>Быстрый ввод</b> — просто пиши в чат:",
-        f"• <code>физ {e.a} {e.b}</code> — оценки {e.a} и {e.b} по физике",
+        f"• <code>физ {e.a} {e.b}</code> — оценки по физике; можно слитно: <code>физ {e.glued}</code>",
         f"• <code>{e.a} {e.b}</code> — спрошу, в какой предмет",
         f"• <code>физ окр {e.okr}</code> — оценка за ОКР",
         "• <code>физ</code> — открыть предмет",
-        f"• <code>физ {e.a}, матан {e.b}</code> — сразу в несколько предметов (можно и по строкам)",
-        f"Разделители любые: пробел, запятая, «/» — <code>{e.a}, {e.b}/{e.c}</code>.",
-        "Названия можно сокращать: «матан», «англ», «оаип».",
+        f"• несколько предметов — каждый с новой строки: <code>физра {e.glued}</code> ⏎ <code>физ {e.a}</code>",
+        "Названия можно сокращать: «матан», «англ», «оаип», или задать своё сокращение (ТОЭ).",
         "",
-        "<b>Аттестация</b> ❌ — если в предмете:",
-        f"• нет оценки за ОКР или она ниже {user.pass_mark};",
-        "• не защищена хоть одна лабораторная или практическая.",
+        "<b>Как считается</b> (Правила аттестации ССО, пост. Минобразования № 282)",
+        f"• положительные отметки — от {user.pass_mark}; округление: 8,5 → 9, 8,4 → 8;",
+        "• за семестр — среднее из ОКР, курсового и среднего текущих (п. 22)"
+        if user.calc_mode == CALC_SSO
+        else "• за семестр — среднее всех отметок;",
+        "• итог с экзаменом — (семестровая + экзамен) / 2"
+        if user.final_mode == FINAL_AVG
+        else "• итог — отметка за экзамен (п. 20);",
+        f"• допуск к экзамену: за семестр от {user.pass_mark}, курсовой от {user.pass_mark}, все ЛР и ПР зачтены;",
+        "• не аттестован — если не сданы ОКР, работы или курсовой.",
         "",
-        "<b>Средний балл</b> предмета — по всем его оценкам (вместе с ОКР). Общий — среднее по предметам.",
-        "",
-        f"<b>Напоминания</b>: {reminders}, и только если ты давно ничего не вносил.",
-        "",
+        f"<b>Напоминания</b>: {reminders}; на каникулах — тишина.",
         "<b>Отмена</b>: после добавления появляется кнопка «↩️ Отменить».",
         "",
-        "Команды: /menu — меню, /stats — статистика, /settings — настройки.",
+        "<i>🔒 Данные хранятся в базе бота у его владельца.</i>",
     ]
     return Screen("\n".join(lines), markup([[btn("⬅️ Меню", Nav(to="main"))]]))
 
@@ -823,25 +1221,37 @@ def help_screen(user: User) -> Screen:
 # ---------------------------------------------------------------- настройки
 
 
-async def settings_screen(repo: Repo, user: User, notice: str | None = None) -> Screen:
+async def settings_screen(repo: Repo, user: User, notice: str | None = None, is_owner: bool = False) -> Screen:
     now = clock.now()
+    semester = await repo.get_semester(user.id, user.semester_id)
     reminders = f"{remind_every_label(user.remind_every)} в {user.remind_time}" if user.remind_every else "выключены"
-    lines = [
-        "⚙️ <b>Настройки</b>",
-        "",
-        f"🔔 Напоминания: {reminders}",
+    calc = "по правилам ССО" if user.calc_mode == CALC_SSO else "простое среднее"
+    final = "(семестр + экзамен) / 2" if user.final_mode == FINAL_AVG else "отметка за экзамен"
+    lines = ["⚙️ <b>Настройки</b>", ""]
+    if semester:
+        lines.append(
+            f"🎓 {esc(semester.label)} · сессия {fmt_range(semester.session_start, semester.session_end)}"
+            f" · каникулы {fmt_range(semester.holidays_start, semester.holidays_end)}"
+        )
+    lines += [
+        f"🔔 Напоминания: {reminders} · о работах: {'вкл' if user.works_reminders else 'выкл'}",
+        f"🧮 За семестр: {calc} · итог: {final}",
         f"🌍 Часовой пояс: {esc(tz_label(user.tz))} · сейчас {fmt_time(now, user.tz)}",
-        f"🔢 Шкала: {user.scale}-балльная · ОКР сдана от {user.pass_mark}",
-        "🧹 Чистый чат: " + ("вкл — убираю твои сообщения, в чате остаётся одно меню" if user.clean_chat else "выкл"),
+        f"🔢 Шкала: {user.scale}-балльная · сдано от {user.pass_mark}",
+        "🧹 Чистый чат: " + ("вкл — убираю твои сообщения, в чате одно меню" if user.clean_chat else "выкл"),
     ]
     rows = [
-        [btn("🔔 Напоминания", Nav(to="rem")), btn("🌍 Часовой пояс", Nav(to="tz"))],
-        [btn("🔢 Шкала и порог ОКР", Nav(to="scale"))],
-        [btn(f"🧹 Чистый чат: {'вкл ✅' if user.clean_chat else 'выкл'}", Nav(to="clean"))],
-        [btn("🗂 Семестры", Sem(a="list")), btn("📤 Экспорт", Nav(to="export"))],
-        [btn("🗑 Удалить все данные", Nav(to="wipe"))],
-        [btn("⬅️ Меню", Nav(to="main"))],
+        [btn("🎓 Семестр и сессия", Nav(to="sem")), btn("🔔 Напоминания", Nav(to="rem"))],
+        [btn("🧮 Как считать", Nav(to="calc")), btn("🌍 Часовой пояс", Nav(to="tz"))],
+        [
+            btn("🔢 Шкала и порог", Nav(to="scale")),
+            btn(f"🧹 Чистый чат: {'вкл ✅' if user.clean_chat else 'выкл'}", Nav(to="clean")),
+        ],
+        [btn("📤 Экспорт", Nav(to="export")), btn("🗑 Удалить всё", Nav(to="wipe"))],
     ]
+    if is_owner:
+        rows.append([btn("🛡 Админ-панель", Adm(a="main"))])
+    rows.append([btn("⬅️ Меню", Nav(to="main"))])
     return Screen(with_notice(notice, lines), markup(rows))
 
 
@@ -855,7 +1265,9 @@ def reminders_screen(user: User, notice: str | None = None) -> Screen:
     lines += [
         f"Твоё время: {fmt_time(now, user.tz)} ({esc(tz_label(user.tz))})",
         "",
-        "Напоминаю, только если ты давно ничего не вносил — без спама.",
+        "Напоминаю внести оценки, только если ты давно ничего не вносил — без спама.",
+        "О незачтённых работах напомню, даже если оценки вносишь (можно выключить).",
+        "На каникулах не беспокою.",
     ]
     if user.skip_sunday:
         lines.append("По воскресеньям не беспокою.")
@@ -863,15 +1275,61 @@ def reminders_screen(user: User, notice: str | None = None) -> Screen:
     rows = [
         [btn(mark(every == 0, "🔕 Выкл"), Rem(a="every", v=0)), btn(mark(every == 1, "Каждый день"), Rem(a="every", v=1))],
         [btn(mark(every == 2, "Раз в 2 дня"), Rem(a="every", v=2)), btn(mark(every == 3, "Раз в 3 дня"), Rem(a="every", v=3))],
-        *chunks(
-            [btn(mark(t == user.remind_time, t), Rem(a="time", v=int(t[:2]) * 60 + int(t[3:]))) for t in REMIND_TIMES],
-            3,
-        ),
+        *chunks([btn(mark(t == user.remind_time, t), Rem(a="time", v=int(t[:2]) * 60 + int(t[3:]))) for t in REMIND_TIMES], 3),
         [btn("⌨️ Другое время", Rem(a="custom"))],
+        [btn(f"🔬 Про незачтённые работы: {'да ✅' if user.works_reminders else 'нет'}", Rem(a="works"))],
         [btn(f"🗓 Не беспокоить в воскресенье: {'да ✅' if user.skip_sunday else 'нет'}", Rem(a="sun"))],
         [btn("🔔 Прислать пример", Rem(a="test"))],
         [btn("⬅️ Назад", Nav(to="settings"))],
     ]  # fmt: skip
+    return Screen(with_notice(notice, lines), markup(rows))
+
+
+def calc_screen(user: User, notice: str | None = None) -> Screen:
+    lines = [
+        "🧮 <b>Как считать</b>",
+        "",
+        "<b>Отметка за семестр</b>",
+        "• <b>По правилам ССО</b> (п. 22): среднее из отметок за ОКР, курсовой и среднего всех остальных "
+        "отметок. Так у предметов профессионального компонента.",
+        "• <b>Простое среднее</b> всех отметок вместе с ОКР.",
+        "",
+        "<b>Итог по экзамену и диф. зачёту</b>",
+        "• <b>(семестровая + экзамен) / 2</b>: 7 и 10 → 8,5 → 9.",
+        "• <b>Только экзамен</b>: по п. 20 Правил отметка за экзамен окончательная за семестр.",
+        "",
+        "<i>Если в колледже считают иначе — выбери, как у тебя.</i>",
+    ]
+    rows = [
+        [btn(mark(user.calc_mode == CALC_SSO, "По правилам ССО"), CalcSet(a="sem", v=0)),
+         btn(mark(user.calc_mode == CALC_MEAN, "Простое среднее"), CalcSet(a="sem", v=1))],
+        [btn(mark(user.final_mode == FINAL_AVG, "(семестр + экзамен)/2"), CalcSet(a="fin", v=0)),
+         btn(mark(user.final_mode == FINAL_EXAM, "Только экзамен"), CalcSet(a="fin", v=1))],
+        [btn("⬅️ Назад", Nav(to="settings"))],
+    ]  # fmt: skip
+    return Screen(with_notice(notice, lines), markup(rows))
+
+
+async def semester_settings_screen(repo: Repo, user: User, notice: str | None = None) -> Screen:
+    semester = await repo.get_semester(user.id, user.semester_id)
+    course = semester.course if semester else 1
+    term = semester.term if semester else 1
+    lines = [
+        "🎓 <b>Семестр и сессия</b>",
+        "",
+        f"Сейчас: <b>{esc(semester.label) if semester else '—'}</b>",
+        f"📝 Сессия: {fmt_range(semester.session_start, semester.session_end) if semester else 'не указаны'}",
+        f"🏖 Каникулы: {fmt_range(semester.holidays_start, semester.holidays_end) if semester else 'не указаны'}",
+        f"🗂 После сессии спросить про архив: {'да' if semester and semester.archive_ask else 'нет'}",
+    ]
+    rows = [
+        [btn(mark(course == c, f"{c} курс"), SemSet(a="course", v=c)) for c in (1, 2, 3, 4)],
+        [btn(mark(term == t, f"{t} семестр"), SemSet(a="term", v=t)) for t in (1, 2)],
+        [btn("✏️ Даты сессии", SemSet(a="session")), btn("✏️ Даты каникул", SemSet(a="holidays"))],
+        [btn(f"🗂 Спрашивать про архив: {'да ✅' if semester and semester.archive_ask else 'нет'}", SemSet(a="ask"))],
+        [btn("🗂 Отправить семестр в архив", Arch(a="ask"))],
+        [btn("⬅️ Назад", Nav(to="settings"))],
+    ]
     return Screen(with_notice(notice, lines), markup(rows))
 
 
@@ -895,89 +1353,15 @@ def scale_screen(user: User, notice: str | None = None) -> Screen:
         "🔢 <b>Шкала оценок</b>",
         "",
         f"Шкала: <b>{user.scale}-балльная</b>",
-        f"ОКР считается сданной от <b>{user.pass_mark}</b> — ниже порога ты не аттестован.",
+        f"Положительные отметки — от <b>{user.pass_mark}</b> (в ССО — от 3, п. 4 Правил).",
+        "Ниже порога: ОКР и курсовой не сданы, нет допуска, экзамен — задолженность.",
     ]
     rows = [
         [btn(mark(user.scale == 10, "10-балльная"), ScaleSet(a="set", v=10)), btn(mark(user.scale == 5, "5-балльная"), ScaleSet(a="set", v=5))],
-        [btn("➖", ScaleSet(a="pass", v=-1)), btn(f"Порог ОКР: {user.pass_mark}", Nav(to="noop")), btn("➕", ScaleSet(a="pass", v=1))],
+        [btn("➖", ScaleSet(a="pass", v=-1)), btn(f"Сдано от: {user.pass_mark}", Nav(to="noop")), btn("➕", ScaleSet(a="pass", v=1))],
         [btn("⬅️ Назад", Nav(to="settings"))],
     ]  # fmt: skip
     return Screen(with_notice(notice, lines), markup(rows))
-
-
-# ---------------------------------------------------------------- семестры
-
-
-async def semesters_screen(repo: Repo, user: User, notice: str | None = None) -> Screen:
-    semesters = await repo.list_semesters(user.id)
-    current = next((s for s in semesters if s.id == user.semester_id), None)
-    archived = [s for s in semesters if s.id != user.semester_id]
-    ov = Overview(await repo.views(user))
-    lines = ["🗂 <b>Семестры</b>", ""]
-    if current:
-        lines.append(
-            f"Сейчас: <b>{esc(current.title)}</b> — {plural(len(ov.views), SUBJECT_FORMS)}, средний {fmt_num(ov.avg)}"
-        )
-        lines.append(f"Начат {fmt_date(current.created_at, user.tz, with_year=True)}")
-    lines.append("")
-    if archived:
-        lines.append("<b>Архив</b> — нажми, чтобы посмотреть итоги:")
-    else:
-        lines.append("Архив пуст. Когда семестр закончится — начни новый, а этот сохранится здесь со всеми оценками.")
-    rows = [[btn("🆕 Начать новый семестр", Sem(a="new"))]]
-    for sem in archived:
-        avg = Overview(await repo.views(user, sem.id)).avg
-        rows.append([btn(f"📁 {sem.title} · {fmt_num(avg)}", Sem(a="view", id=sem.id))])
-    rows.append([btn("⬅️ Назад", Nav(to="settings"))])
-    return Screen(with_notice(notice, lines), markup(rows))
-
-
-async def semester_view_screen(repo: Repo, user: User, sem_id: int) -> Screen | None:
-    semester = await repo.get_semester(user.id, sem_id)
-    if semester is None:
-        return None
-    ov = Overview(await repo.views(user, sem_id))
-    period = fmt_date(semester.created_at, user.tz, with_year=True)
-    if semester.archived_at:
-        period += " — " + fmt_date(semester.archived_at, user.tz, with_year=True)
-    lines = [f"📁 <b>{esc(semester.title)}</b> · архив", period, ""]
-    lines.append(f"📊 Средний балл: <b>{fmt_num(ov.avg)}</b>")
-    if ov.views:
-        lines.append(f"Аттестован: {len(ov.views) - len(ov.failing)} из {len(ov.views)}")
-        lines.append("")
-        for v in ov.views:
-            avg = fmt_num(v.avg) if v.avg is not None else "без оценок"
-            lines.append(f"{subject_title(v)} — {avg} {'✅' if v.ok else '❌'}")
-    else:
-        lines.append("Предметов не было.")
-    return Screen("\n".join(lines), markup([[btn("⬅️ Назад", Sem(a="list"))]]))
-
-
-async def new_semester_confirm(repo: Repo, user: User) -> Screen:
-    semester = await repo.get_semester(user.id, user.semester_id)
-    title = esc(semester.title) if semester else "Текущий семестр"
-    lines = [
-        "🆕 <b>Начать новый семестр?</b>",
-        "",
-        f"«{title}» уйдёт в архив: все оценки и итоги сохранятся, их можно будет посмотреть "
-        "в 🗂 Семестрах. Новый семестр начнётся с чистого листа.",
-    ]
-    rows = [[btn("✅ Да, начать", Sem(a="new_yes")), btn("⬅️ Отмена", Sem(a="list"))]]
-    return Screen("\n".join(lines), markup(rows))
-
-
-def new_semester_subjects(title: str, previous_id: int, previous_count: int) -> Screen:
-    lines = [f"🎉 Начат семестр «{esc(title)}»."]
-    rows: list[Row] = []
-    if previous_count:
-        lines += [
-            "",
-            f"Перенести список предметов из прошлого семестра ({previous_count})? "
-            "Переносятся только названия и настройки ОКР — оценки и работы останутся в архиве.",
-        ]
-        rows.append([btn("📋 Да, перенести", Sem(a="copy", id=previous_id))])
-    rows.append([btn("✏️ Введу новые", Sem(a="fresh"))])
-    return Screen("\n".join(lines), markup(rows))
 
 
 def wipe_screen() -> Screen:
@@ -990,3 +1374,277 @@ def wipe_screen() -> Screen:
     ]
     rows = [[btn("🗑 Да, удалить всё", Nav(to="wipe_yes"))], [btn("⬅️ Отмена", Nav(to="settings"))]]
     return Screen("\n".join(lines), markup(rows))
+
+
+# ---------------------------------------------------------------- архив
+
+
+def final_line(v: SubjectView) -> str:
+    final = v.final
+    if final is None:
+        value = fmt_num(v.semester_exact) if v.semester_exact is not None else "без оценок"
+        if v.has_session:
+            value += f" · {CONTROL_LABEL[v.control]} не сдан"
+    elif final.kind == "grade":
+        value = f"<b>{final.value}</b>"
+        if v.has_session and v.subject.exam_grade is not None:
+            value += f" ({CONTROL_LABEL[v.control]} {v.subject.exam_grade})"
+    elif final.kind == "pass":
+        value = "зачтено ✅"
+    elif final.kind == "debt":
+        value = f"🆘 {esc(final.note)}"
+    else:
+        value = "не аттестован ❌"
+    line = f"{v.icon} {esc(v.label)} — {value}"
+    if v.subject.project and v.subject.project_grade is not None:
+        line += f" · курсовой {v.subject.project_grade}"
+    return line
+
+
+def live_line(v: SubjectView) -> str:
+    """Предмет текущего семестра одной строкой: «⚛️ Физика — 8,50 ❌ (нет оценки за ОКР)»."""
+    line = f"{v.icon} {esc(v.label)} — {value_label(v)} {v.status_icon}"
+    if v.problems:
+        line += f" ({esc('; '.join(v.reasons()))})"
+    return line
+
+
+def summary_lines(ov: Overview) -> list[str]:
+    lines = []
+    if ov.finals_avg is not None:
+        lines.append(f"📊 Средний итоговых отметок: <b>{fmt_num(ov.finals_avg)}</b>")
+    if ov.session_avg is not None:
+        lines.append(f"🎓 Средний сессии: <b>{fmt_num(ov.session_avg)}</b>")
+    if ov.debts:
+        lines.append("🆘 Задолженности: " + ", ".join(esc(v.label) for v in ov.debts))
+    return lines
+
+
+async def diploma_avg(repo: Repo, user: User) -> tuple[float | None, int]:
+    """Средний итоговых отметок за все семестры — примерно как в приложении к диплому."""
+    values: list[int] = []
+    semesters = 0
+    for semester in await repo.list_semesters(user.id):
+        ov = Overview(await repo.views(user, semester.id))
+        finals = [v.final.value for v in ov.views if v.final is not None and v.final.kind == "grade" and v.final.value]
+        if finals:
+            semesters += 1
+            values.extend(finals)
+    return mean(values), semesters
+
+
+async def archive_screen(repo: Repo, user: User, notice: str | None = None) -> Screen:
+    semesters = await repo.list_semesters(user.id)
+    current = next((s for s in semesters if s.id == user.semester_id), None)
+    archived = [s for s in semesters if s.archived_at]
+    ov = Overview(await repo.views(user))
+    lines = ["🗂 <b>Архив</b>", ""]
+    if current:
+        lines.append(
+            f"Сейчас: <b>{esc(current.label)}</b> — {plural(len(ov.views), SUBJECT_FORMS)}, средний {fmt_num(ov.avg)}"
+        )
+    total, count = await diploma_avg(repo, user)
+    if total is not None:
+        lines.append(f"🎓 Средний за всё обучение: <b>{fmt_num(total)}</b> (итоговые отметки, семестров: {count})")
+    lines.append("")
+    if archived:
+        lines.append("Нажми на семестр, чтобы посмотреть итоги:")
+    else:
+        lines.append("Архив пуст. После сессии я предложу отправить семестр сюда — со всеми оценками и итогами.")
+    rows: list[Row] = []
+    for semester in archived:
+        avg = Overview(await repo.views(user, semester.id)).finals_avg
+        rows.append([btn(f"📁 {semester.label} · {fmt_num(avg)}", Arch(a="view", id=semester.id))])
+    if ov.views:
+        rows.append([btn("🗂 Отправить текущий семестр в архив", Arch(a="ask"))])
+    rows.append([btn("⬅️ Меню", Nav(to="main"))])
+    return Screen(with_notice(notice, lines), markup(rows))
+
+
+async def archive_view_screen(repo: Repo, user: User, sem_id: int) -> Screen | None:
+    semester = await repo.get_semester(user.id, sem_id)
+    if semester is None:
+        return None
+    ov = Overview(await repo.views(user, sem_id))
+    period = fmt_date(semester.created_at, user.tz, with_year=True)
+    if semester.archived_at:
+        period += " — " + fmt_date(semester.archived_at, user.tz, with_year=True)
+    lines = [f"📁 <b>{esc(semester.label)}</b> · архив", period, "", *summary_lines(ov)]
+    if ov.views:
+        lines += ["", "<b>Итоги</b>"]
+        lines += [final_line(v) for v in ov.views]
+    else:
+        lines.append("Предметов не было.")
+    return Screen("\n".join(lines), markup([[btn("⬅️ Архив", Arch(a="list"))]]))
+
+
+async def archive_confirm_screen(repo: Repo, user: User) -> Screen:
+    semester = await repo.get_semester(user.id, user.semester_id)
+    ov = Overview(await repo.views(user))
+    title = esc(semester.label) if semester else "семестр"
+    lines = [f"🗂 <b>Отправить «{title}» в архив?</b>", "", *summary_lines(ov)]
+    if ov.views:
+        lines += ["", *[final_line(v) for v in ov.views]]
+    if ov.debts:
+        lines += ["", "⚠️ Есть задолженности — если пересдашь, лучше сначала внести отметку."]
+    lines += ["", "Потом начнётся следующий семестр: введёшь новые предметы или перенесёшь список."]
+    rows = [[btn("✅ Да, в архив", Arch(a="yes")), btn("⬅️ Отмена", Nav(to="main"))]]
+    return Screen("\n".join(lines), markup(rows))
+
+
+def after_archive_screen(old_label: str, new: Semester, previous_id: int, previous_count: int) -> Screen:
+    lines = [
+        f"🎉 «{esc(old_label)}» теперь в архиве — его можно посмотреть в 🗂 Архив.",
+        "",
+        f"Начат <b>{esc(new.label)}</b>. Предметы обычно другие — введи их, когда будет расписание.",
+    ]
+    rows: list[Row] = [[btn("✏️ Ввести предметы", Arch(a="fresh"))]]
+    if previous_count:
+        rows.append([btn(f"📋 Перенести список ({previous_count})", Arch(a="copy", id=previous_id))])
+    rows.append([btn("⏰ Позже — в меню", Nav(to="main"))])
+    return Screen("\n".join(lines), markup(rows))
+
+
+def archive_prompt(semester: Semester, ov: Overview) -> Screen:
+    lines = [f"🎓 <b>Сессия закончилась!</b> «{esc(semester.label)}»"]
+    session = ov.session_views
+    if session:
+        lines.append(f"🏁 Сдано: {len(ov.session_done)} из {len(session)}")
+    lines += summary_lines(ov)
+    lines += ["", "Отправить семестр в архив? Его можно будет посмотреть в 🗂 Архив."]
+    rows = [
+        [btn("✅ Да, в архив", Arch(a="yes")), btn("⏳ Спросить позже", Arch(a="later"))],
+        [btn("🙅 Не спрашивать", Arch(a="never"))],
+    ]
+    return Screen("\n".join(lines), markup(rows))
+
+
+# ---------------------------------------------------------------- доступ и админка
+
+
+def deny_screen() -> Screen:
+    lines = [
+        "🔒 <b>Это личный бот</b>",
+        "",
+        "Пользоваться можно по приглашению владельца. Нажми кнопку — он получит заявку.",
+    ]
+    return Screen("\n".join(lines), markup([[btn("📨 Попросить доступ", ACCESS_REQUEST)]]))
+
+
+def request_card(user_id: int, name: str, username: str | None) -> Screen:
+    who = esc(name or "Без имени") + (f" (@{esc(username)})" if username else "")
+    lines = ["📨 <b>Заявка на доступ</b>", "", f"{who}", f"id: <code>{user_id}</code>"]
+    rows = [[btn("✅ Пустить", Adm(a="ok", id=user_id)), btn("❌ Отказать", Adm(a="no", id=user_id))]]
+    return Screen("\n".join(lines), markup(rows))
+
+
+def who(user: User) -> str:
+    name = esc(user.name or "Без имени")
+    return f"{name} (@{esc(user.username)})" if user.username else name
+
+
+async def admin_screen(repo: Repo, is_open: bool, notice: str | None = None) -> Screen:
+    users = await repo.all_users()
+    week_ago = clock.now() - 7 * 86400
+    active = sum(1 for u in users if (u.last_data_at or 0) >= week_ago)
+    requests = await repo.requests()
+    lines = [
+        "🛡 <b>Админ-панель</b>",
+        "",
+        f"👥 Пользователей: {len(users)} · вносили оценки за неделю: {active}",
+        f"📨 Заявок: {len(requests)}",
+        "🔐 Доступ: " + ("открыт для всех" if is_open else "только приглашённые"),
+        "",
+        "<i>Просмотр результатов — тихий: пользователь ничего не узнает.</i>",
+    ]
+    rows = [
+        [btn("➕ Добавить по юзернейму", Adm(a="add"))],
+        [btn("👥 Пользователи", Adm(a="users")), btn(f"📨 Заявки ({len(requests)})", Adm(a="requests"))],
+        [btn("🔒 Закрыть для всех, кроме приглашённых" if is_open else "🔓 Открыть для всех", Adm(a="open"))],
+        [btn("⬅️ Меню", Nav(to="main"))],
+    ]
+    return Screen(with_notice(notice, lines), markup(rows))
+
+
+ADMIN_PAGE = 12
+
+
+async def admin_users_screen(repo: Repo, owner_id: int | None, page: int = 0, notice: str | None = None) -> Screen:
+    users = [u for u in await repo.all_users() if u.id != owner_id]
+    access = await repo.access_list()
+    known = {u.id for u in users} | {u.username for u in users if u.username}
+    waiting = [r for r in access if r["user_id"] not in known and r["username"] not in known]
+    pages = max(1, math.ceil(len(users) / ADMIN_PAGE))
+    page = min(max(page, 0), pages - 1)
+    lines = ["👥 <b>Пользователи</b>", ""]
+    if not users and not waiting:
+        lines.append("Пока никого. Добавь кого-нибудь по юзернейму.")
+    if waiting:
+        lines.append(
+            "⏳ Приглашены, но ещё не заходили: "
+            + ", ".join(f"@{esc(r['username'])}" if r["username"] else str(r["user_id"]) for r in waiting)
+        )
+    rows: list[Row] = []
+    for u in users[page * ADMIN_PAGE : (page + 1) * ADMIN_PAGE]:
+        rows.append(
+            [
+                btn(
+                    f"👤 {truncate(u.name or 'Без имени', 18)}" + (f" @{u.username}" if u.username else ""),
+                    Adm(a="user", id=u.id),
+                )
+            ]
+        )
+    for r in waiting:
+        label = f"🗑 @{r['username']}" if r["username"] else f"🗑 id {r['user_id']}"
+        rows.append([btn(f"{label} — убрать приглашение", Adm(a="unlist", id=r["id"]))])
+    if pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(btn("◀️", Adm(a="users", p=page - 1)))
+        nav.append(btn(f"{page + 1} / {pages}", Nav(to="noop")))
+        if page < pages - 1:
+            nav.append(btn("▶️", Adm(a="users", p=page + 1)))
+        rows.append(nav)
+    rows.append([btn("⬅️ Админ-панель", Adm(a="main"))])
+    return Screen(with_notice(notice, lines), markup(rows))
+
+
+async def admin_user_screen(repo: Repo, target: User, has_access: bool, notice: str | None = None) -> Screen:
+    now = clock.now()
+    semester = await repo.get_semester(target.id, target.semester_id)
+    ov = Overview(await repo.views(target))
+    lines = [
+        f"👤 <b>{who(target)}</b>",
+        f"id: <code>{target.id}</code> · вносил данные: {ago(target.last_data_at, now, target.tz)}",
+        "",
+    ]
+    if not target.onboarded:
+        lines.append("Ещё не закончил знакомство с ботом.")
+    if semester:
+        lines.append(f"🎓 {esc(semester.label)}")
+    if ov.views:
+        lines.append(f"📊 Средний балл: <b>{fmt_num(ov.avg)}</b> · оценок: {ov.grades_count}")
+        if ov.works_total:
+            lines.append(f"🔬 Зачтено работ: {ov.works_done} из {ov.works_total}")
+        lines += ["", *[live_line(v) for v in ov.views]]
+    total, count = await diploma_avg(repo, target)
+    if total is not None and count > 1:
+        lines += ["", f"🎓 Средний за всё обучение: {fmt_num(total)} (семестров: {count})"]
+    rows: list[Row] = []
+    if has_access:
+        rows.append([btn("🔒 Закрыть доступ", Adm(a="revoke", id=target.id))])
+    rows.append([btn("⬅️ Пользователи", Adm(a="users"))])
+    return Screen(with_notice(notice, lines), markup(rows))
+
+
+async def admin_requests_screen(repo: Repo, notice: str | None = None) -> Screen:
+    requests = await repo.requests()
+    lines = ["📨 <b>Заявки на доступ</b>", ""]
+    if not requests:
+        lines.append("Заявок нет.")
+    rows: list[Row] = []
+    for r in requests:
+        name = truncate(r["name"] or "Без имени", 18) + (f" @{r['username']}" if r["username"] else "")
+        rows.append([btn(f"✅ {name}", Adm(a="ok", id=r["user_id"])), btn("❌", Adm(a="no", id=r["user_id"]))])
+    rows.append([btn("⬅️ Админ-панель", Adm(a="main"))])
+    return Screen(with_notice(notice, lines), markup(rows))

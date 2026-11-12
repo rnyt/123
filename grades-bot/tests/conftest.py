@@ -70,13 +70,40 @@ SUBJECTS = "Высшая математика, Физика, Программи�
 
 
 async def onboard(
-    client: Client, subjects: str = SUBJECTS, scale: str = "10-балльная", no_okr: tuple[str, ...] = ("Английский",)
+    client: Client,
+    subjects: str = SUBJECTS,
+    course: str = "2 курс",
+    no_okr: tuple[str, ...] = ("Английский",),
+    exams: dict[str, int] | None = None,
+    projects: tuple[str, ...] = (),
+    session: str | None = None,
+    holidays: str | None = None,
 ) -> None:
-    """Пройти знакомство: шкала → предметы → где нет ОКР → готово."""
+    """Пройти знакомство: курс → предметы → ОКР/экзамены/курсовые → даты.
+
+    exams: {"Физика": 1} — сколько раз нажать (1 — экзамен, 2 — диф. зачёт, 3 — зачёт).
+    """
     await client.send("/start")
-    await client.press(scale)
+    await client.press(course)
     await client.send(subjects)
     await client.press("Дальше")
     for name in no_okr:
         await client.press(name)
-    await client.press("Готово")
+    if exams:
+        await client.press("🎓 Экзамены")
+        for name, taps in exams.items():
+            for _ in range(taps):
+                await client.press(name)
+    if projects:
+        await client.press("📐 Курсовые")
+        for name in projects:
+            await client.press(name)
+    await client.press("Дальше")
+    if session:
+        await client.send(session)
+    else:
+        await client.press("Пропустить")
+    if holidays:
+        await client.send(holidays)
+    else:
+        await client.press("Пропустить")

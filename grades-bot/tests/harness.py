@@ -7,6 +7,7 @@ FakeTelegram подменяет HTTP-сессию aiogram и хранит «ча
 from __future__ import annotations
 
 import itertools
+import re
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -34,6 +35,53 @@ from aiogram.methods import (
 from aiogram.types import CallbackQuery, Chat, InlineKeyboardMarkup, Message, Update, User
 
 BOT_ID = 42
+
+ALLOWED_TAGS = {
+    "b",
+    "strong",
+    "i",
+    "em",
+    "u",
+    "ins",
+    "s",
+    "strike",
+    "del",
+    "a",
+    "code",
+    "pre",
+    "tg-spoiler",
+    "blockquote",
+}
+_TAG = re.compile(r"<(/?)([a-z-]+)(?:\s[^<>]*)?>")
+_ENTITY = re.compile(r"&(?:lt|gt|amp|quot|#\d+);")
+
+
+def check_html(text: str) -> None:
+    """Проверка, как у Telegram: разрешённые теги, правильная вложенность, экранированные < и &."""
+    stack: list[str] = []
+    pos = 0
+    while (start := text.find("<", pos)) != -1:
+        match = _TAG.match(text, start)
+        if not match or match.group(2) not in ALLOWED_TAGS:
+            raise TelegramBadRequest(
+                method=None,
+                message=f"Bad Request: can't parse entities: bad tag at {start}: {text[start : start + 20]!r}",
+            )  # type: ignore[arg-type]
+        closing, tag = match.group(1), match.group(2)
+        if closing:
+            if not stack or stack.pop() != tag:
+                raise TelegramBadRequest(method=None, message=f"Bad Request: can't parse entities: unexpected </{tag}>")  # type: ignore[arg-type]
+        else:
+            stack.append(tag)
+        pos = match.end()
+    if stack:
+        raise TelegramBadRequest(method=None, message=f"Bad Request: can't parse entities: unclosed <{stack[-1]}>")  # type: ignore[arg-type]
+    for amp in re.finditer("&", text):
+        if not _ENTITY.match(text, amp.start()):
+            raise TelegramBadRequest(method=None, message="Bad Request: can't parse entities: unescaped &")  # type: ignore[arg-type]
+    visible = _ENTITY.sub("x", _TAG.sub("", text))
+    if len(visible) > 4096:
+        raise TelegramBadRequest(method=None, message="Bad Request: message is too long")  # type: ignore[arg-type]
 
 
 @dataclass
@@ -84,6 +132,10 @@ class FakeTelegram(BaseSession):
 
     async def make_request(self, bot: Bot, method: TelegramMethod[Any], timeout: int | None = None) -> Any:
         self.calls.append(method)
+        if isinstance(method, SendMessage | EditMessageText):
+            check_html(method.text)
+        if isinstance(method, SendDocument) and method.caption:
+            check_html(method.caption)
         if isinstance(method, SendMessage):
             chat_id = int(method.chat_id)
             if chat_id in self.blocked:
@@ -158,10 +210,22 @@ class Client:
 
     _updates = itertools.count(1)
 
-    def __init__(self, dp: Dispatcher, bot: Bot, tg: FakeTelegram, user_id: int = 777, name: str = "Вася Пупкин"):
+    def __init__(
+        self,
+        dp: Dispatcher,
+        bot: Bot,
+        tg: FakeTelegram,
+        user_id: int = 777,
+        name: str = "Вася Пупкин",
+        username: str | None = "ztpst",
+    ):
         self.dp, self.bot, self.tg = dp, bot, tg
         self.user = User(
-            id=user_id, is_bot=False, first_name=name.split()[0], last_name=" ".join(name.split()[1:]) or None
+            id=user_id,
+            is_bot=False,
+            first_name=name.split()[0],
+            last_name=" ".join(name.split()[1:]) or None,
+            username=username,
         )
 
     @property

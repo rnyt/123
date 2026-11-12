@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aiogram import Bot
 from aiogram.fsm.context import FSMContext
@@ -15,6 +15,9 @@ from .panel import Panel
 from .repo import Repo
 from .screens import Screen
 
+if TYPE_CHECKING:
+    from .access import Access
+
 
 @dataclass
 class Ctx:
@@ -23,6 +26,8 @@ class Ctx:
     panel: Panel
     state: FSMContext
     bot: Bot
+    access: Access | None = None
+    is_owner: bool = False
 
     async def mode(self, state: State | None = None, **data: Any) -> None:
         """Переключить режим ввода и заменить данные диалога."""

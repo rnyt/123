@@ -14,7 +14,24 @@ from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from functools import cache, cached_property, lru_cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .models import LAB, PRAC, Grade, Subject, User, Work
+from .models import (
+    CALC_MEAN,
+    CALC_SSO,
+    CONTROL_LABEL,
+    CONTROLS,
+    CREDIT,
+    DIFF,
+    EXAM,
+    FINAL_AVG,
+    FINAL_EXAM,
+    LAB,
+    NONE,
+    PRAC,
+    Grade,
+    Subject,
+    User,
+    Work,
+)
 
 # ---------------------------------------------------------------- ограничения
 
@@ -23,7 +40,8 @@ MAX_NAME_LEN = 60
 MAX_WORKS_PER_SUBJECT = 60
 MAX_BATCH = 20  # оценок за один раз
 
-SCALES: dict[int, int] = {10: 4, 5: 3}  # шкала -> порог сдачи ОКР по умолчанию
+# Шкала -> порог: в ССО положительные отметки — от 3 (п. 4 Правил № 282).
+SCALES: dict[int, int] = {10: 3, 5: 3}
 
 SNOOZE_SECONDS = 2 * 60 * 60
 REMIND_WINDOW = timedelta(hours=4)  # если бот был выключен в момент напоминания
@@ -125,6 +143,26 @@ def split_names(text: str) -> list[str]:
         if part:
             result.append(part[:MAX_NAME_LEN].strip())
     return result
+
+
+_ABBR = re.compile(r"^(?P<name>.+?)\s*\((?P<short>[^()\d\s]{2,10})\)\s*$")
+
+
+def parse_subject_entry(text: str) -> tuple[str, str | None]:
+    """«Теоретические основы электротехники (ТОЭ)» -> ('Теоретические основы электротехники', 'ТОЭ')."""
+    text = text.strip()
+    match = _ABBR.match(text)
+    if match and len(match.group("name").strip()) > len(match.group("short")):
+        return match.group("name").strip(), match.group("short").strip()
+    return text, None
+
+
+def clean_short(text: str) -> str | None:
+    """Сокращение предмета: до 12 символов, без лишних пробелов; «-» — убрать."""
+    value = " ".join(text.split()).strip(" ()")
+    if value in {"", "-", "—", "–"}:
+        return None
+    return value[:12]
 
 
 _LEADING_ICON = re.compile(r"^([^\w\s«\"'(\[{<]{1,8})\s+(\S.*)$")
@@ -307,6 +345,9 @@ def match_subjects(query: str, subjects: Sequence[Subject]) -> list[Subject]:
     q = norm(query)
     if not q:
         return []
+    by_short = [s for s in subjects if s.short and norm(s.short) == q]
+    if by_short:
+        return by_short
     compact = q.replace(" ", "")
     named = [(s, norm(display_name(s.name))) for s in subjects]
     slang = SLANG.get(q) or SLANG.get(compact) or ()
@@ -357,16 +398,40 @@ _DIGITS = re.compile(r"[0-9]+")
 _OKR_WORDS = {"окр", "окр.", "окр:"}
 
 
+def split_digits(token: str, high: int) -> list[int] | None:
+    """Слитные цифры: «1078105» -> [10, 7, 8, 10, 5] (на 10-балльной «10» — одна оценка)."""
+    values: list[int] = []
+    i = 0
+    while i < len(token):
+        if high >= 10 and token.startswith("10", i):
+            values.append(10)
+            i += 2
+            continue
+        digit = int(token[i])
+        if digit == 0:
+            return None
+        values.append(digit)
+        i += 1
+    return values
+
+
 def parse_grades(text: str, low: int, high: int) -> tuple[list[int], list[str]]:
-    """«8, 9/10 7» -> ([8, 9, 10, 7], []). Неверные кусочки возвращаются отдельно."""
+    """«8, 9/10 7» -> ([8, 9, 10, 7], []); «10910» -> [10, 9, 10]. Неверные кусочки — отдельно."""
     values: list[int] = []
     bad: list[str] = []
     for token in _GRADE_SEPARATORS.split(text.strip()):
         token = token.strip(".")
         if not token:
             continue
-        if _DIGITS.fullmatch(token) and low <= int(token) <= high:
+        if not _DIGITS.fullmatch(token):
+            bad.append(token)
+            continue
+        if low <= int(token) <= high:
             values.append(int(token))
+            continue
+        pieces = split_digits(token, high) if len(token) > 1 else None
+        if pieces and all(low <= v <= high for v in pieces):
+            values.extend(pieces)
         else:
             bad.append(token)
     return values, bad
@@ -459,51 +524,74 @@ def need_count(values: Sequence[int], threshold: float, grade: int) -> int | Non
     return max(k, 1)
 
 
-def next_goal(values: Sequence[int], scale: int, limit: int = 25) -> Goal | None:
-    if not values:
+def goal_for(values: Sequence[int], need_avg: float, scale: int, target: int, limit: int = 25) -> Goal | None:
+    """Варианты «k × g», чтобы среднее `values` стало не ниже `need_avg`."""
+    best = need_count(values, need_avg, scale)
+    if not best or best > limit:
         return None
-    rounded = round_half_up(sum(values) / len(values))
-    if rounded >= scale:
-        return None
-    target = rounded + 1
-    threshold = target - 0.5
-
-    best = need_count(values, threshold, scale)
-    if best is None or best > limit:
-        return None
+    low = max(math.floor(need_avg) + 1, 1)
     options: list[tuple[int, int]] = []
     # Самая низкая оценка, которой хватит за минимальное число попыток.
-    for grade in range(math.floor(threshold) + 1, scale + 1):
-        if need_count(values, threshold, grade) == best:
+    for grade in range(low, scale + 1):
+        if need_count(values, need_avg, grade) == best:
             options.append((grade, best))
             break
     # Вариант «чуть больше оценок, но пониже».
-    if options and options[0][0] > math.floor(threshold) + 1:
-        for grade in range(math.floor(threshold) + 1, options[0][0]):
-            k = need_count(values, threshold, grade)
+    if options and options[0][0] > low:
+        for grade in range(low, options[0][0]):
+            k = need_count(values, need_avg, grade)
             if k is not None and k <= min(best + 2, limit):
                 options.append((grade, k))
                 break
     return Goal(target=target, options=options)
 
 
+def next_goal(values: Sequence[int], scale: int, limit: int = 25) -> Goal | None:
+    """Цель для простого среднего: до следующей округлённой оценки."""
+    if not values:
+        return None
+    rounded = round_half_up(sum(values) / len(values))
+    if rounded >= scale:
+        return None
+    return goal_for(values, rounded + 0.5, scale, rounded + 1, limit)
+
+
 @dataclass(slots=True)
 class Problem:
-    kind: str  # "no_okr" | "okr_low" | "pending"
+    # no_okr | okr_low | works | project_missing | project_low | semester_low | exam_failed | credit_failed
+    kind: str
     slot: int = 0
     value: int = 0
     works: list[Work] = field(default_factory=list)
 
 
+ADMISSION_KINDS = frozenset({"no_okr", "okr_low", "works", "project_missing", "project_low", "semester_low"})
+
+
+@dataclass(slots=True)
+class Final:
+    """Итог по предмету за семестр."""
+
+    kind: str  # grade — отметка, pass — зачтено, debt — задолженность, na — не аттестован
+    value: int | None = None
+    note: str = ""
+
+    @property
+    def done(self) -> bool:
+        return self.kind in ("grade", "pass")
+
+
 @dataclass
 class SubjectView:
-    """Всё, что нужно знать о предмете для экрана: средний, ОКР, работы, аттестация."""
+    """Всё о предмете для экрана: средний, ОКР, работы, курсовой, допуск, экзамен, итог."""
 
     subject: Subject
     grades: list[Grade]
     works: list[Work]
     pass_mark: int
     scale: int
+    calc_mode: str = CALC_SSO
+    final_mode: str = FINAL_AVG
 
     @property
     def id(self) -> int:
@@ -517,22 +605,109 @@ class SubjectView:
     def name(self) -> str:
         return display_name(self.subject.name)
 
+    @property
+    def short(self) -> str | None:
+        return self.subject.short
+
+    @property
+    def label(self) -> str:
+        """Как подписывать в кнопках: сокращение, если есть."""
+        return self.subject.short or self.name
+
+    @property
+    def title(self) -> str:
+        return f"{self.name} ({self.short})" if self.short else self.name
+
+    @property
+    def control(self) -> str:
+        return self.subject.control if self.subject.control in CONTROLS else NONE
+
+    # ------------------------------------------------------------ отметки
+
     @cached_property
     def values(self) -> list[int]:
         return [g.value for g in self.grades]
 
     @cached_property
-    def avg(self) -> float | None:
-        return mean(self.values)
+    def regular(self) -> list[Grade]:
+        """Обычные отметки текущей аттестации (без ОКР и без оценок за работы)."""
+        return [g for g in self.grades if not g.is_okr and not g.is_work]
 
     @cached_property
-    def regular(self) -> list[Grade]:
-        return [g for g in self.grades if not g.is_okr]
+    def work_grades(self) -> dict[int, Grade]:
+        return {g.work_id: g for g in self.grades if g.work_id is not None}
+
+    @cached_property
+    def current(self) -> list[int]:
+        """Все отметки текущей аттестации: обычные и за работы (без ОКР)."""
+        return [g.value for g in self.grades if not g.is_okr]
+
+    @cached_property
+    def current_avg(self) -> float | None:
+        return mean(self.current)
 
     @cached_property
     def okr_slots(self) -> list[tuple[int, Grade | None]]:
         by_slot = {g.okr_no: g for g in self.grades if g.is_okr}
         return [(slot, by_slot.get(slot)) for slot in range(1, self.subject.okr_count + 1)]
+
+    @cached_property
+    def okr_values(self) -> list[int]:
+        return [g.value for _, g in self.okr_slots if g is not None]
+
+    @property
+    def simple(self) -> bool:
+        """Простое среднее: так выбрано в настройках или предмет общеобразовательный."""
+        return self.calc_mode == CALC_MEAN or self.subject.general
+
+    @cached_property
+    def parts(self) -> list[tuple[str, float]]:
+        """Слагаемые отметки за семестр по п. 22 Правил: ОКР, курсовой, среднее текущих."""
+        result: list[tuple[str, float]] = []
+        for slot, grade in self.okr_slots:
+            if grade is not None:
+                result.append((self.okr_label(slot), grade.value))
+        if self.subject.project and self.subject.project_grade is not None:
+            result.append(("курсовой", self.subject.project_grade))
+        if self.current_avg is not None:
+            result.append(("текущие", self.current_avg))
+        return result
+
+    @cached_property
+    def semester_exact(self) -> float | None:
+        """Отметка за семестр до округления."""
+        if self.simple:
+            return mean(self.values)
+        return mean(value for _, value in self.parts)
+
+    @property
+    def avg(self) -> float | None:
+        return self.semester_exact
+
+    @cached_property
+    def semester_grade(self) -> int | None:
+        return round_half_up(self.semester_exact) if self.semester_exact is not None else None
+
+    @property
+    def formula(self) -> str | None:
+        """«(ОКР 8 + курсовой 9 + текущие 7,20) / 3 = 8,07» — когда считается не простым средним."""
+        if self.simple or len(self.parts) < 2:
+            return None
+        terms = " + ".join(f"{name} {fmt_num(value) if value % 1 else int(value)}" for name, value in self.parts)
+        return f"({terms}) / {len(self.parts)} = {fmt_num(self.semester_exact)}"
+
+    @cached_property
+    def goal(self) -> Goal | None:
+        if self.simple:
+            return next_goal(self.values, self.scale)
+        if not self.current or self.semester_grade is None or self.semester_grade >= self.scale:
+            return None
+        fixed = [value for name, value in self.parts if name != "текущие"]
+        target = self.semester_grade + 1
+        need_avg = (target - 0.5) * (len(fixed) + 1) - sum(fixed)
+        return goal_for(self.current, need_avg, self.scale, target)
+
+    # ------------------------------------------------------------ работы
 
     @cached_property
     def labs(self) -> list[Work]:
@@ -543,8 +718,19 @@ class SubjectView:
         return sorted((w for w in self.works if w.kind == PRAC), key=lambda w: (w.num, w.id))
 
     @cached_property
+    def open_works(self) -> list[Work]:
+        """Ещё не зачтённые работы (в том числе «не зачтено»)."""
+        return [w for w in self.labs + self.pracs if not w.passed]
+
+    @property
     def pending(self) -> list[Work]:
-        return [w for w in self.labs + self.pracs if not w.defended]
+        return self.open_works
+
+    # ------------------------------------------------------------ аттестация
+
+    @property
+    def has_session(self) -> bool:
+        return self.control != NONE
 
     @cached_property
     def problems(self) -> list[Problem]:
@@ -554,8 +740,20 @@ class SubjectView:
                 result.append(Problem("no_okr", slot=slot))
             elif grade.value < self.pass_mark:
                 result.append(Problem("okr_low", slot=slot, value=grade.value))
-        if self.pending:
-            result.append(Problem("pending", works=self.pending))
+        if self.open_works:
+            result.append(Problem("works", works=self.open_works))
+        if self.subject.project:
+            if self.subject.project_grade is None:
+                result.append(Problem("project_missing"))
+            elif self.subject.project_grade < self.pass_mark:
+                result.append(Problem("project_low", value=self.subject.project_grade))
+        if self.semester_grade is not None and self.semester_grade < self.pass_mark:
+            result.append(Problem("semester_low", value=self.semester_grade))
+        exam = self.subject.exam_grade
+        if self.control in (EXAM, DIFF) and exam is not None and exam < self.pass_mark:
+            result.append(Problem("exam_failed", value=exam))
+        if self.control == CREDIT and self.subject.credit is False:
+            result.append(Problem("credit_failed"))
         return result
 
     @property
@@ -563,27 +761,112 @@ class SubjectView:
         return not self.problems
 
     @property
+    def admission_problems(self) -> list[Problem]:
+        return [p for p in self.problems if p.kind in ADMISSION_KINDS]
+
+    @property
+    def admitted(self) -> bool:
+        """Допуск к экзамену / диф. зачёту (п. 19–20): за семестр от 3, курсовой от 3, работы зачтены."""
+        if not self.has_session or self.admission_problems:
+            return False
+        return self.control == CREDIT or self.semester_grade is not None
+
+    @property
     def avg_below_pass(self) -> bool:
-        return self.avg is not None and self.avg < self.pass_mark
+        return self.semester_exact is not None and self.semester_exact < self.pass_mark
+
+    @property
+    def control_label(self) -> str:
+        return CONTROL_LABEL[self.control]
 
     @cached_property
-    def goal(self) -> Goal | None:
-        return next_goal(self.values, self.scale)
+    def final(self) -> Final | None:
+        """Итог за семестр или None, если ещё рано."""
+        control = self.control
+        if control in (EXAM, DIFF):
+            exam = self.subject.exam_grade
+            if exam is None:
+                return None
+            if exam < self.pass_mark:
+                return Final("debt", exam, f"{self.control_label} на {exam}")
+            semester = self.semester_grade
+            if self.final_mode == FINAL_EXAM or semester is None:
+                return Final("grade", exam, f"{self.control_label} {exam}")
+            exact = (semester + exam) / 2
+            return Final("grade", round_half_up(exact), f"({semester} + {exam}) / 2 = {fmt_num(exact, 1)}")
+        if control == CREDIT:
+            if self.subject.credit is None:
+                return None
+            return Final("pass", None, "зачтено") if self.subject.credit else Final("debt", None, "не зачтено")
+        if self.semester_grade is None:
+            return None
+        blocking = [p for p in self.problems if p.kind != "semester_low"]
+        if blocking:
+            return Final("na", None, "не аттестован")
+        if self.semester_grade < self.pass_mark:
+            return Final("debt", self.semester_grade, f"за семестр {self.semester_grade}")
+        return Final("grade", self.semester_grade, "за семестр")
+
+    @property
+    def exam_pending(self) -> bool:
+        return self.control in (EXAM, DIFF) and self.subject.exam_grade is None
+
+    @property
+    def can_exempt(self) -> bool:
+        """Отметка за семестр 9+ — можно получить освобождение от экзамена (п. 20)."""
+        return (
+            self.control == EXAM
+            and self.scale == 10
+            and self.exam_pending
+            and self.semester_grade is not None
+            and self.semester_grade >= 9
+        )
+
+    def exam_table(self) -> list[tuple[int, int, int]]:
+        """Какой выйдет итог при каждой отметке за экзамен: [(от, до, итог), ...]."""
+        if self.final_mode != FINAL_AVG or self.semester_grade is None:
+            return []
+        rows: list[list[int]] = []
+        for exam in range(self.pass_mark, self.scale + 1):
+            result = round_half_up((self.semester_grade + exam) / 2)
+            if rows and rows[-1][2] == result:
+                rows[-1][1] = exam
+            else:
+                rows.append([exam, exam, result])
+        return [(lo, hi, result) for lo, hi, result in rows]
 
     def okr_label(self, slot: int) -> str:
         return "ОКР" if self.subject.okr_count <= 1 else f"ОКР №{slot}"
 
-    def reasons(self) -> list[str]:
-        """Человеческие причины неаттестации: «нет ОКР», «не защищены ЛР 3, ЛР 4»."""
+    def reasons(self, admission_only: bool = False) -> list[str]:
+        """Причины по-человечески: «нет ОКР», «не зачтены ЛР 3, ЛР 4», «курсовой не защищён»."""
         lines = []
-        for p in self.problems:
+        problems = self.admission_problems if admission_only else self.problems
+        for p in problems:
             if p.kind == "no_okr":
                 lines.append(f"нет оценки за {self.okr_label(p.slot)}")
             elif p.kind == "okr_low":
                 lines.append(f"{self.okr_label(p.slot)} на {p.value} (нужно от {self.pass_mark})")
-            elif p.kind == "pending":
-                lines.append("не защищены " + short_list([w.short for w in p.works]))
+            elif p.kind == "works":
+                lines.append("не зачтены " + short_list([w.short for w in p.works]))
+            elif p.kind == "project_missing":
+                lines.append("курсовой проект не защищён")
+            elif p.kind == "project_low":
+                lines.append(f"курсовой на {p.value} (нужно от {self.pass_mark})")
+            elif p.kind == "semester_low":
+                lines.append(f"за семестр выходит {p.value} (нужно от {self.pass_mark})")
+            elif p.kind == "exam_failed":
+                lines.append(f"{self.control_label} на {p.value} — нужна пересдача")
+            elif p.kind == "credit_failed":
+                lines.append("зачёт не сдан — нужна пересдача")
         return lines
+
+    @property
+    def status_icon(self) -> str:
+        """🏁 — экзамен/зачёт сдан, ❌ — есть проблемы, ✅ — всё в порядке."""
+        if self.has_session and self.final is not None and self.final.done:
+            return "🏁"
+        return "❌" if self.problems else "✅"
 
 
 @dataclass
@@ -592,19 +875,22 @@ class Overview:
 
     @cached_property
     def avg(self) -> float | None:
-        """Средний балл = среднее по средним предметов (у каждого предмета равный вес)."""
-        return mean(v.avg for v in self.views if v.avg is not None)
+        """Средний балл = среднее отметок за семестр по предметам (у каждого предмета равный вес)."""
+        return mean(v.semester_exact for v in self.views if v.semester_exact is not None)
 
     @cached_property
     def avg_all(self) -> float | None:
-        """Среднее по всем оценкам подряд."""
+        """Среднее по всем отметкам подряд."""
         return mean(value for v in self.views for value in v.values)
 
     def avg_before(self, ts: int) -> float | None:
         """Каким был средний балл на момент ts — для динамики «за неделю»."""
-        return mean(
-            avg for v in self.views if (avg := mean(g.value for g in v.grades if g.created_at < ts)) is not None
-        )
+        past = [
+            SubjectView(v.subject, [g for g in v.grades if g.created_at < ts], v.works, v.pass_mark, v.scale,
+                        v.calc_mode, v.final_mode)
+            for v in self.views
+        ]  # fmt: skip
+        return mean(v.semester_exact for v in past if v.semester_exact is not None)
 
     def added_since(self, ts: int) -> int:
         return sum(1 for v in self.views for g in v.grades if g.created_at >= ts)
@@ -619,11 +905,47 @@ class Overview:
 
     @property
     def works_done(self) -> int:
-        return sum(1 for v in self.views for w in v.works if w.defended)
+        return sum(1 for v in self.views for w in v.works if w.passed)
+
+    @property
+    def open_works(self) -> list[tuple[SubjectView, list[Work]]]:
+        return [(v, v.open_works) for v in self.views if v.open_works]
 
     @property
     def failing(self) -> list[SubjectView]:
-        return [v for v in self.views if not v.ok]
+        return [v for v in self.views if v.problems]
+
+    @property
+    def session_views(self) -> list[SubjectView]:
+        return [v for v in self.views if v.has_session]
+
+    @property
+    def session_done(self) -> list[SubjectView]:
+        return [v for v in self.session_views if v.final is not None and v.final.done]
+
+    @property
+    def debts(self) -> list[SubjectView]:
+        return [v for v in self.views if v.final is not None and v.final.kind == "debt"]
+
+    @property
+    def session_complete(self) -> bool:
+        return bool(self.session_views) and len(self.session_done) == len(self.session_views)
+
+    @property
+    def session_avg(self) -> float | None:
+        """Средний балл сессии: по экзаменам и диф. зачётам."""
+        return mean(
+            v.subject.exam_grade
+            for v in self.session_views
+            if v.control in (EXAM, DIFF) and v.subject.exam_grade is not None
+        )
+
+    @property
+    def finals_avg(self) -> float | None:
+        """Средний итоговых отметок за семестр."""
+        return mean(
+            v.final.value for v in self.views if v.final is not None and v.final.kind == "grade" and v.final.value
+        )
 
 
 # ---------------------------------------------------------------- время и напоминания
@@ -704,13 +1026,15 @@ def parse_hhmm(text: str) -> time | None:
     return time(hours, minutes)
 
 
-def reminder_due(user: User, now_ts: int) -> str | None:
-    """Пора ли напоминать: None | 'regular' | 'snooze' | 'clear_snooze'.
+def reminder_due(user: User, now_ts: int, paused: bool = False, works_due: bool = False) -> str | None:
+    """Пора ли напоминать: None | 'regular' | 'works' | 'snooze' | 'clear_snooze'.
 
-    Обычное напоминание приходит в выбранное время, если с последнего внесения
-    данных и с последнего напоминания прошло не меньше `remind_every` дней.
+    В выбранное время, не чаще раза в `remind_every` дней:
+    * 'regular' — давно (не меньше `remind_every` дней) ничего не вносил;
+    * 'works' — вносил, но остались незачтённые работы и включены напоминания о них.
+    На каникулах (paused) не напоминаем вовсе.
     """
-    if user.blocked or not user.onboarded:
+    if user.blocked or not user.onboarded or paused:
         return None
     if user.snooze_until:
         if now_ts < user.snooze_until:
@@ -721,20 +1045,26 @@ def reminder_due(user: User, now_ts: int) -> str | None:
         return "snooze"
     if user.remind_every <= 0:
         return None
-
-    local = local_dt(now_ts, user.tz)
-    at = parse_hhmm(user.remind_time) or time(20, 0)
-    start = local.replace(hour=at.hour, minute=at.minute, second=0, microsecond=0)
-    if local < start or local >= start + REMIND_WINDOW:
-        return None
-    if user.skip_sunday and local.weekday() == 6:
+    if not in_window(user, now_ts):
         return None
     if user.last_reminded_at and days_between(user.last_reminded_at, now_ts, user.tz) < user.remind_every:
         return None
     base = user.last_data_at or user.created_at
-    if days_between(base, now_ts, user.tz) < user.remind_every:
-        return None
-    return "regular"
+    if days_between(base, now_ts, user.tz) >= user.remind_every:
+        return "regular"
+    if works_due and user.works_reminders:
+        return "works"
+    return None
+
+
+def in_window(user: User, now_ts: int) -> bool:
+    """Сейчас время напоминаний пользователя (и не воскресенье, если так выбрано)?"""
+    local = local_dt(now_ts, user.tz)
+    at = parse_hhmm(user.remind_time) or time(20, 0)
+    start = local.replace(hour=at.hour, minute=at.minute, second=0, microsecond=0)
+    if local < start or local >= start + REMIND_WINDOW:
+        return False
+    return not (user.skip_sunday and local.weekday() == 6)
 
 
 def semester_title(day: date) -> str:

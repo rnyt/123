@@ -1,4 +1,4 @@
-"""Настройки: напоминания, часовой пояс, шкала, чистый чат, семестры, экспорт, удаление."""
+"""Настройки: семестр и сессия, напоминания, как считать, пояс, шкала, чистый чат, экспорт, удаление."""
 
 from __future__ import annotations
 
@@ -7,34 +7,109 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram.utils.callback_answer import CallbackAnswer
 
 from .. import clock, screens
-from ..callbacks import Nav, Rem, ScaleSet, Sem, TzSet
+from ..callbacks import CalcSet, Nav, Rem, ScaleSet, SemSet, TzSet
 from ..context import Ctx
+from ..dates import fmt_range, parse_range
 from ..export import build_csv
-from ..logic import (
-    SCALES,
-    SUBJECT_FORMS,
-    fmt_time,
-    parse_hhmm,
-    parse_tz,
-    plural,
-    remind_every_label,
-)
+from ..logic import SCALES, fmt_time, parse_hhmm, parse_tz, remind_every_label
+from ..models import CALC_MEAN, CALC_SSO, FINAL_AVG, FINAL_EXAM
 from ..reminders import send_reminder
-from ..screens import TZ_CHOICES, esc, tz_label
-from ..states import Inp, OnbSt
-from .common import Event, go_main, resume_onboarding
+from ..screens import TZ_CHOICES, esc, today_for, tz_label
+from ..states import Inp
+from .common import Event, resume_onboarding
 
 router = Router(name="settings")
 
 
 async def _settings(event: Event, ctx: Ctx, notice: str | None = None) -> None:
     await ctx.mode()
-    await ctx.show(event, await screens.settings_screen(ctx.repo, ctx.user, notice))
+    await ctx.show(event, await screens.settings_screen(ctx.repo, ctx.user, notice, is_owner=ctx.is_owner))
 
 
 @router.callback_query(Nav.filter(F.to == "settings"))
 async def settings_view(cq: CallbackQuery, ctx: Ctx) -> None:
     await _settings(cq, ctx)
+
+
+# ---------------------------------------------------------------- семестр и сессия
+
+
+async def _semester(event: Event, ctx: Ctx, notice: str | None = None) -> None:
+    await ctx.mode()
+    await ctx.show(event, await screens.semester_settings_screen(ctx.repo, ctx.user, notice))
+
+
+@router.callback_query(Nav.filter(F.to == "sem"))
+async def semester_view(cq: CallbackQuery, ctx: Ctx) -> None:
+    await _semester(cq, ctx)
+
+
+@router.callback_query(SemSet.filter())
+async def semester_action(cq: CallbackQuery, callback_data: SemSet, ctx: Ctx) -> None:
+    action, value = callback_data.a, callback_data.v
+    sem_id = ctx.user.semester_id
+    semester = await ctx.repo.get_semester(ctx.user.id, sem_id)
+    if semester is None:
+        await _settings(cq, ctx)
+        return
+    notice = None
+    if action == "course" and 1 <= value <= 4:
+        semester = await ctx.repo.update_semester(ctx.user.id, sem_id, course=value)
+        notice = f"🎓 Теперь: {esc(semester.label)}." if semester else None
+    elif action == "term" and value in (1, 2):
+        semester = await ctx.repo.update_semester(ctx.user.id, sem_id, term=value)
+        notice = f"🎓 Теперь: {esc(semester.label)}." if semester else None
+    elif action in ("session", "holidays"):
+        await ctx.mode(Inp.dates, which=action)
+        await ctx.show(cq, screens.onboarding_dates(action, from_settings=True))
+        return
+    elif action in ("clear_session", "clear_holidays"):
+        which = action.removeprefix("clear_")
+        await ctx.repo.update_semester(ctx.user.id, sem_id, **{f"{which}_start": None, f"{which}_end": None})
+        notice = "🗑 Даты убраны."
+    elif action == "ask":
+        await ctx.repo.update_semester(ctx.user.id, sem_id, archive_ask=not semester.archive_ask, archive_asked_at=None)
+        notice = "🗂 После сессии спрошу про архив." if not semester.archive_ask else "🗂 Про архив спрашивать не буду."
+    await _semester(cq, ctx, notice)
+
+
+@router.message(Inp.dates, F.text)
+async def dates_text(message: Message, ctx: Ctx) -> None:
+    data = await ctx.data()
+    which = data.get("which") if data.get("which") in ("session", "holidays") else "session"
+    parsed = parse_range(message.text or "", today_for(ctx.user))
+    if parsed is None:
+        notice = "⚠️ Не понял даты. Пример: <code>22.12–14.01</code> или <code>22 декабря – 14 января</code>"
+        await ctx.show(message, screens.onboarding_dates(which, notice, from_settings=True))
+        return
+    start, end = parsed
+    await ctx.repo.update_semester(
+        ctx.user.id, ctx.user.semester_id, **{f"{which}_start": start.isoformat(), f"{which}_end": end.isoformat()},
+        archive_asked_at=None,
+    )  # fmt: skip
+    label = "Сессия" if which == "session" else "Каникулы"
+    await _semester(message, ctx, f"✅ {label}: {fmt_range(start.isoformat(), end.isoformat())}")
+
+
+# ---------------------------------------------------------------- как считать
+
+
+@router.callback_query(Nav.filter(F.to == "calc"))
+async def calc_view(cq: CallbackQuery, ctx: Ctx) -> None:
+    await ctx.mode()
+    await ctx.show(cq, screens.calc_screen(ctx.user))
+
+
+@router.callback_query(CalcSet.filter())
+async def calc_set(cq: CallbackQuery, callback_data: CalcSet, ctx: Ctx) -> None:
+    if callback_data.a == "sem":
+        ctx.user = await ctx.repo.update_user(ctx.user.id, calc_mode=CALC_MEAN if callback_data.v else CALC_SSO)
+        notice = "🧮 За семестр: простое среднее." if callback_data.v else "🧮 За семестр: по правилам ССО (п. 22)."
+    else:
+        ctx.user = await ctx.repo.update_user(ctx.user.id, final_mode=FINAL_EXAM if callback_data.v else FINAL_AVG)
+        notice = "🧮 Итог: только экзамен." if callback_data.v else "🧮 Итог: (семестровая + экзамен) / 2."
+    await ctx.mode()
+    await ctx.show(cq, screens.calc_screen(ctx.user, notice))
 
 
 # ---------------------------------------------------------------- напоминания
@@ -64,6 +139,11 @@ async def reminders_action(cq: CallbackQuery, callback_data: Rem, ctx: Ctx, call
     elif action == "sun":
         ctx.user = await ctx.repo.update_user(ctx.user.id, skip_sunday=not ctx.user.skip_sunday)
         notice = "🗓 По воскресеньям не беспокою." if ctx.user.skip_sunday else "🗓 Воскресенье — как обычный день."
+    elif action == "works":
+        ctx.user = await ctx.repo.update_user(ctx.user.id, works_reminders=not ctx.user.works_reminders)
+        notice = (
+            "🔬 Буду напоминать про незачтённые работы." if ctx.user.works_reminders else "🔬 Про работы не напоминаю."
+        )
     elif action == "custom":
         await ctx.mode(Inp.time)
         await ctx.show(cq, screens.prompt_screen(TIME_TITLE, TIME_BODY, Nav(to="rem")))
@@ -82,8 +162,7 @@ async def reminders_time_text(message: Message, ctx: Ctx) -> None:
     at = parse_hhmm(message.text or "")
     if at is None:
         await ctx.show(
-            message,
-            screens.prompt_screen(TIME_TITLE, TIME_BODY, Nav(to="rem"), "⚠️ Не похоже на время. Пример: 19:30"),
+            message, screens.prompt_screen(TIME_TITLE, TIME_BODY, Nav(to="rem"), "⚠️ Не похоже на время. Пример: 19:30")
         )
         return
     fields: dict[str, object] = {"remind_time": at.strftime("%H:%M")}
@@ -147,14 +226,14 @@ async def scale_set(cq: CallbackQuery, callback_data: ScaleSet, ctx: Ctx, callba
             callback_answer.show_alert = True
             return
         ctx.user = await ctx.repo.update_user(ctx.user.id, scale=callback_data.v, pass_mark=SCALES[callback_data.v])
-        notice = f"✅ Шкала: {ctx.user.scale}-балльная, порог ОКР — {ctx.user.pass_mark}."
+        notice = f"✅ Шкала: {ctx.user.scale}-балльная, сдано от {ctx.user.pass_mark}."
     elif callback_data.a == "pass":
         new = min(max(ctx.user.pass_mark + (1 if callback_data.v > 0 else -1), 1), ctx.user.scale)
         if new == ctx.user.pass_mark:
             callback_answer.text = "Дальше некуда"
         else:
             ctx.user = await ctx.repo.update_user(ctx.user.id, pass_mark=new)
-            callback_answer.text = f"Порог ОКР: {new}"
+            callback_answer.text = f"Сдано от: {new}"
     await ctx.mode()
     await ctx.show(cq, screens.scale_screen(ctx.user, notice))
 
@@ -178,11 +257,12 @@ async def export(cq: CallbackQuery, ctx: Ctx, callback_answer: CallbackAnswer) -
     await ctx.bot.send_document(
         ctx.user.id,
         BufferedInputFile(data, filename=filename),
-        caption="📤 Все оценки, ОКР и работы текущего семестра. Открывается в Excel и Google Таблицах.",
+        caption="📤 Оценки, ОКР, работы, экзамены и итоги семестра. Открывается в Excel и Google Таблицах.",
     )
     callback_answer.text = "Файл отправлен 👇"
     await ctx.mode()
-    await ctx.fresh(None, await screens.settings_screen(ctx.repo, ctx.user, "📤 Файл с оценками — сообщением выше."))
+    screen = await screens.settings_screen(ctx.repo, ctx.user, "📤 Файл с оценками — сообщением выше.", ctx.is_owner)
+    await ctx.fresh(None, screen)
 
 
 # ---------------------------------------------------------------- удаление всего
@@ -196,60 +276,7 @@ async def wipe_confirm(cq: CallbackQuery, ctx: Ctx) -> None:
 
 @router.callback_query(Nav.filter(F.to == "wipe_yes"))
 async def wipe(cq: CallbackQuery, ctx: Ctx) -> None:
-    name = ctx.user.name
+    name, username = ctx.user.name, ctx.user.username
     await ctx.repo.delete_user(ctx.user.id)
-    ctx.user = await ctx.repo.ensure_user(ctx.user.id, name)
+    ctx.user = await ctx.repo.ensure_user(ctx.user.id, name, username)
     await resume_onboarding(cq, ctx, notice="🗑 Все данные удалены. Начнём заново!")
-
-
-# ---------------------------------------------------------------- семестры
-
-
-@router.callback_query(Sem.filter(F.a == "list"))
-async def semesters_view(cq: CallbackQuery, ctx: Ctx) -> None:
-    await ctx.mode()
-    await ctx.show(cq, await screens.semesters_screen(ctx.repo, ctx.user))
-
-
-@router.callback_query(Sem.filter(F.a == "view"))
-async def semester_view(cq: CallbackQuery, callback_data: Sem, ctx: Ctx) -> None:
-    screen = None
-    if callback_data.id != ctx.user.semester_id:
-        screen = await screens.semester_view_screen(ctx.repo, ctx.user, callback_data.id)
-    await ctx.mode()
-    await ctx.show(cq, screen or await screens.semesters_screen(ctx.repo, ctx.user))
-
-
-@router.callback_query(Sem.filter(F.a == "new"))
-async def semester_new_confirm(cq: CallbackQuery, ctx: Ctx) -> None:
-    await ctx.mode()
-    await ctx.show(cq, await screens.new_semester_confirm(ctx.repo, ctx.user))
-
-
-@router.callback_query(Sem.filter(F.a == "new_yes"))
-async def semester_new(cq: CallbackQuery, ctx: Ctx) -> None:
-    previous_id = ctx.user.semester_id or 0
-    previous_count = len(await ctx.repo.list_subjects(ctx.user.id, previous_id))
-    semester = await ctx.repo.start_new_semester(ctx.user)
-    await ctx.refresh_user()
-    await ctx.mode()
-    await ctx.show(cq, screens.new_semester_subjects(semester.title, previous_id, previous_count))
-
-
-@router.callback_query(Sem.filter(F.a == "copy"))
-async def semester_copy(cq: CallbackQuery, callback_data: Sem, ctx: Ctx, callback_answer: CallbackAnswer) -> None:
-    if await ctx.repo.list_subjects(ctx.user.id, ctx.user.semester_id):
-        callback_answer.text = "Предметы уже есть"
-        await go_main(cq, ctx)
-        return
-    if callback_data.id == ctx.user.semester_id:
-        await go_main(cq, ctx)
-        return
-    copied = await ctx.repo.copy_subjects(ctx.user.id, callback_data.id, ctx.user.semester_id or 0)
-    await go_main(cq, ctx, notice=f"📋 Перенёс {plural(copied, SUBJECT_FORMS)}. Удачного семестра! 🍀")
-
-
-@router.callback_query(Sem.filter(F.a == "fresh"))
-async def semester_fresh(cq: CallbackQuery, ctx: Ctx) -> None:
-    await ctx.mode(OnbSt.subjects)
-    await ctx.show(cq, await screens.onboarding_subjects(ctx.repo, ctx.user))

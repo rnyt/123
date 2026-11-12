@@ -12,7 +12,9 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 
-from .app import build_dispatcher, setup_bot_profile
+from .access import Access
+from .app import build_dispatcher
+from .commands import setup_bot_profile
 from .config import Config, load_config
 from .db import connect
 from .reminders import reminder_loop
@@ -32,14 +34,15 @@ async def run(config: Config) -> None:
         session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True),
     )
-    dp = build_dispatcher(repo, storage, config.allowed_users)
+    access = Access(repo, owner=config.owner, allowed_ids=config.allowed_users)
+    dp = build_dispatcher(repo, storage, access)
     tasks: list[asyncio.Task[None]] = []
 
     async def on_startup(bot: Bot) -> None:
         me = await bot.me()
-        await setup_bot_profile(bot)
+        await setup_bot_profile(bot, await access.owner_id())
         tasks.append(asyncio.create_task(reminder_loop(bot, repo, dp["panel"], storage, config.reminder_check_seconds)))
-        log.info("Бот @%s запущен. База: %s", me.username, config.db_path)
+        log.info("Бот @%s запущен. Владелец: %s. База: %s", me.username, config.owner, config.db_path)
 
     async def on_shutdown() -> None:
         for task in tasks:

@@ -79,6 +79,59 @@ MIGRATIONS: list[str] = [
         data   TEXT NOT NULL DEFAULT '{}'
     );
     """,
+    # v2 — колледж (ССО): курс/семестр и даты сессии, экзамены и зачёты, курсовые,
+    # «не зачтено» у работ, оценка за работу, доступ по приглашению и админ-панель.
+    """
+    ALTER TABLE users ADD COLUMN username TEXT;
+    ALTER TABLE users ADD COLUMN works_reminders INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE users ADD COLUMN final_mode TEXT NOT NULL DEFAULT 'avg';
+    ALTER TABLE users ADD COLUMN calc_mode TEXT NOT NULL DEFAULT 'sso';
+    CREATE INDEX ix_users_username ON users(username);
+
+    ALTER TABLE semesters ADD COLUMN course INTEGER;
+    ALTER TABLE semesters ADD COLUMN term INTEGER;
+    ALTER TABLE semesters ADD COLUMN session_start TEXT;
+    ALTER TABLE semesters ADD COLUMN session_end TEXT;
+    ALTER TABLE semesters ADD COLUMN holidays_start TEXT;
+    ALTER TABLE semesters ADD COLUMN holidays_end TEXT;
+    ALTER TABLE semesters ADD COLUMN archive_asked_at INTEGER;
+    ALTER TABLE semesters ADD COLUMN archive_ask INTEGER NOT NULL DEFAULT 1;
+
+    ALTER TABLE subjects ADD COLUMN short TEXT;
+    ALTER TABLE subjects ADD COLUMN control TEXT NOT NULL DEFAULT 'none';
+    ALTER TABLE subjects ADD COLUMN exam_grade INTEGER;
+    ALTER TABLE subjects ADD COLUMN credit INTEGER;
+    ALTER TABLE subjects ADD COLUMN project INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE subjects ADD COLUMN project_grade INTEGER;
+    ALTER TABLE subjects ADD COLUMN general INTEGER NOT NULL DEFAULT 0;
+
+    ALTER TABLE works ADD COLUMN failed INTEGER NOT NULL DEFAULT 0;
+
+    ALTER TABLE grades ADD COLUMN work_id INTEGER REFERENCES works(id) ON DELETE CASCADE;
+    CREATE INDEX ix_grades_work ON grades(work_id);
+
+    CREATE TABLE access (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id    INTEGER UNIQUE,
+        username   TEXT UNIQUE,                         -- без @, в нижнем регистре
+        added_at   INTEGER NOT NULL
+    );
+
+    CREATE TABLE access_requests (
+        user_id       INTEGER PRIMARY KEY,
+        username      TEXT,
+        name          TEXT NOT NULL DEFAULT '',
+        requested_at  INTEGER NOT NULL
+    );
+
+    CREATE TABLE meta (
+        key    TEXT PRIMARY KEY,
+        value  TEXT
+    );
+
+    -- Порог сдачи в ССО — 3 (п. 4 Правил № 282), а не 4.
+    UPDATE users SET pass_mark = 3 WHERE scale = 10 AND pass_mark = 4;
+    """,
 ]
 
 

@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from bot.dates import next_term, parse_range, phase, term_for
 from bot.logic import (
     Overview,
     SubjectView,
@@ -14,21 +15,29 @@ from bot.logic import (
     parse_grades,
     parse_hhmm,
     parse_quick,
+    parse_subject_entry,
     parse_tz,
     plural,
     progress_bar,
     reminder_due,
     round_half_up,
     semester_title,
+    split_digits,
     split_icon,
     split_names,
+    split_segments,
     subject_icon,
 )
-from bot.models import LAB, PRAC, Grade, Subject, User, Work
+from bot.models import CALC_MEAN, CREDIT, DIFF, EXAM, FINAL_EXAM, LAB, NONE, PRAC, Grade, Subject, User, Work
 
 
-def subj(sid: int, name: str, okr: int = 1) -> Subject:
-    return Subject(sid, 1, 1, name, okr, sid, 0)
+def subj(sid: int, name: str, okr: int = 1, short: str | None = None, **kw) -> Subject:
+    fields = dict(
+        id=sid, user_id=1, semester_id=1, name=name, short=short, okr_count=okr, position=sid, created_at=0,
+        control=NONE, exam_grade=None, credit=None, project=False, project_grade=None, general=False,
+    )  # fmt: skip
+    fields.update(kw)
+    return Subject(**fields)
 
 
 SUBJECTS = [
@@ -39,6 +48,7 @@ SUBJECTS = [
     subj(5, "Русский язык"),
     subj(6, "Математический анализ"),
     subj(7, "Физическая культура", okr=0),
+    subj(8, "Теоретические основы электротехники", short="ТОЭ"),
 ]
 
 
@@ -59,15 +69,16 @@ def test_plural(n: int, expected: str) -> None:
 
 def test_round_half_up_is_school_rounding() -> None:
     assert round_half_up(7.5) == 8
-    assert round_half_up(8.5) == 9  # round() дал бы 8
+    assert round_half_up(8.5) == 9  # round() дал бы 8 — а по правилам ССО (п. 8) нужно 9
+    assert round_half_up(6.7) == 7
     assert round_half_up(7.49) == 7
 
 
 def test_progress_bar() -> None:
     assert progress_bar(0, 3) == "▱▱▱"
     assert progress_bar(3, 3) == "▰▰▰"
-    assert progress_bar(1, 20) == "▰▱▱▱▱▱▱▱▱▱"  # хоть одна защищена — видно
-    assert progress_bar(19, 20) == "▰▰▰▰▰▰▰▰▰▱"  # не все — не полный
+    assert progress_bar(1, 20) == "▰▱▱▱▱▱▱▱▱▱"
+    assert progress_bar(19, 20) == "▰▰▰▰▰▰▰▰▰▱"
     assert progress_bar(0, 0) == ""
 
 
@@ -79,15 +90,42 @@ def test_parse_grades_any_separators() -> None:
     assert parse_grades("4/5", 1, 5) == ([4, 5], [])
 
 
-def test_parse_grades_rejects_out_of_scale_and_fractions() -> None:
-    values, bad = parse_grades("8 11 7.5 abc", 1, 10)
+@pytest.mark.parametrize(
+    ("text", "values"),
+    [("1078105", [10, 7, 8, 10, 5]), ("10910", [10, 9, 10]), ("99910", [9, 9, 9, 10]), ("101010", [10, 10, 10]), ("10", [10])],
+)  # fmt: skip
+def test_glued_digits_are_split(text: str, values: list[int]) -> None:
+    assert parse_grades(text, 1, 10) == (values, [])
+
+
+def test_glued_digits_on_five_point_scale() -> None:
+    assert parse_grades("4545", 1, 5) == ([4, 5, 4, 5], [])
+    assert parse_grades("10", 1, 5) == ([], ["10"])
+
+
+def test_split_digits_rejects_zero() -> None:
+    assert split_digits("100", 10) is None
+    assert split_digits("1078105", 10) == [10, 7, 8, 10, 5]
+
+
+def test_parse_grades_rejects_garbage() -> None:
+    values, bad = parse_grades("8 100 7.5 abc", 1, 10)
     assert values == [8]
-    assert bad == ["11", "7.5", "abc"]
+    assert bad == ["100", "7.5", "abc"]
 
 
 def test_split_names_handles_lists() -> None:
     text = "1. Высшая математика\n- Физика; Химия,  Английский   язык\n\n• История."
     assert split_names(text) == ["Высшая математика", "Физика", "Химия", "Английский язык", "История"]
+
+
+def test_subject_entry_with_abbreviation() -> None:
+    assert parse_subject_entry("Теоретические основы электротехники (ТОЭ)") == (
+        "Теоретические основы электротехники",
+        "ТОЭ",
+    )
+    assert parse_subject_entry("Английский язык (B2)") == ("Английский язык (B2)", None)  # уровень — не сокращение
+    assert parse_subject_entry("Физика") == ("Физика", None)
 
 
 @pytest.mark.parametrize(
@@ -97,6 +135,7 @@ def test_split_names_handles_lists() -> None:
         ("Физика: 8,9", "Физика", [8, 9], False),
         ("8 9 физ", "физ", [8, 9], False),
         ("матан 9/8 10", "матан", [9, 8, 10], False),
+        ("физра 10910", "физра", [10, 9, 10], False),
         ("физ окр 7", "физ", [7], True),
         ("окр физ 7", "физ", [7], True),
         ("физика8", "физика", [8], False),
@@ -115,9 +154,19 @@ def test_parse_quick_prefers_full_subject_name_with_digits() -> None:
 
 
 def test_parse_quick_reports_bad_grades() -> None:
-    quick = parse_quick("физ 8 11", 1, 10)
+    quick = parse_quick("физ 8 100", 1, 10)
     assert quick.values == [8]
-    assert quick.bad == ["11"]
+    assert quick.bad == ["100"]
+
+
+def test_split_segments() -> None:
+    assert split_segments("физра 10910\nохрана 99910\nфизика 101010") == [
+        "физра 10910",
+        "охрана 99910",
+        "физика 101010",
+    ]
+    assert split_segments("физ 8 9, матан 7") == ["физ 8 9", "матан 7"]
+    assert split_segments("Физика: 8, 9") == ["Физика: 8, 9"]
 
 
 # ---------------------------------------------------------------- поиск предмета
@@ -136,6 +185,7 @@ def test_parse_quick_reports_bad_grades() -> None:
         ("вышка", ["Высшая математика", "Математический анализ"]),  # сленг
         ("физра", ["Физическая культура"]),
         ("физикка", ["Физика"]),  # опечатка
+        ("тоэ", ["Теоретические основы электротехники"]),  # своё сокращение
         ("химия", []),
     ],
 )
@@ -163,6 +213,7 @@ def test_match_subjects_slang_both_ways() -> None:
         ("Литература", "📖"),  # «ит» внутри слова — не IT
         ("Теория вероятностей и математическая статистика", "📊"),
         ("Основы права", "⚖️"),
+        ("Охрана труда", "🦺"),
         ("Что-то новое", "📘"),
         ("🧮 Матан", "🧮"),
     ],
@@ -199,64 +250,167 @@ def test_next_goal_none_on_top() -> None:
     assert next_goal([], 10) is None
 
 
-# ---------------------------------------------------------------- аттестация
+# ---------------------------------------------------------------- отметка за семестр, допуск, итог
 
 
-def make_view(okr_count: int = 1, grades: list[Grade] | None = None, works: list[Work] | None = None) -> SubjectView:
-    return SubjectView(subj(1, "Физика", okr_count), grades or [], works or [], pass_mark=4, scale=10)
+def grade(value: int, okr: int | None = None, gid: int = 1, work: int | None = None) -> Grade:
+    return Grade(id=gid, subject_id=1, value=value, okr_no=okr, work_id=work, created_at=0)
 
 
-def grade(value: int, okr: int | None = None, gid: int = 1) -> Grade:
-    return Grade(gid, 1, value, okr, 0)
+def work(num: int, passed: bool, kind: str = LAB, failed: bool = False) -> Work:
+    return Work(id=num + (100 if kind == PRAC else 0), subject_id=1, kind=kind, num=num, title=None,
+                defended_at=100 if passed else None, failed=failed, created_at=0)  # fmt: skip
 
 
-def work(num: int, defended: bool, kind: str = LAB) -> Work:
-    return Work(num, 1, kind, num, None, 100 if defended else None, 0)
+def make_view(grades=(), works=(), pass_mark: int = 3, calc=None, final=None, **subject_kw) -> SubjectView:
+    kw = {}
+    if calc:
+        kw["calc_mode"] = calc
+    if final:
+        kw["final_mode"] = final
+    return SubjectView(subj(1, "Физика", **subject_kw), list(grades), list(works), pass_mark, 10, **kw)
+
+
+def test_semester_grade_by_rule_22() -> None:
+    """п. 22: среднее из ОКР, курсового и среднего остальных отметок."""
+    view = make_view([grade(6), grade(8), grade(7), grade(9, okr=1, gid=2)], project=True, project_grade=8)
+    assert view.current_avg == 7
+    assert view.semester_exact == pytest.approx(8.0)  # (9 + 8 + 7) / 3
+    assert view.semester_grade == 8
+    assert view.formula == "(ОКР 9 + курсовой 8 + текущие 7) / 3 = 8,00"
+
+
+def test_semester_grade_simple_mean() -> None:
+    view = make_view([grade(6), grade(8), grade(7), grade(9, okr=1, gid=2)], calc=CALC_MEAN)
+    assert view.semester_exact == 7.5
+    assert view.formula is None
+    general = make_view([grade(6), grade(8), grade(7), grade(9, okr=1, gid=2)], general=True)
+    assert general.semester_exact == 7.5  # общеобразовательный — тоже простое среднее
+
+
+def test_work_grades_count_in_current() -> None:
+    view = make_view([grade(6), grade(10, work=1, gid=2)], works=[work(1, True)], okr=0)
+    assert view.current == [6, 10]
+    assert view.semester_exact == 8
+    assert view.work_grades[1].value == 10
 
 
 def test_not_certified_without_okr() -> None:
-    view = make_view(grades=[grade(9)])
+    view = make_view([grade(9)])
     assert not view.ok
     assert view.reasons() == ["нет оценки за ОКР"]
 
 
-def test_not_certified_with_low_okr() -> None:
-    view = make_view(grades=[grade(9), grade(3, okr=1, gid=2)])
+def test_okr_below_three_is_a_problem() -> None:
+    assert make_view([grade(9), grade(2, okr=1, gid=2)]).reasons() == ["ОКР на 2 (нужно от 3)"]
+    assert make_view([grade(9), grade(3, okr=1, gid=2)]).ok  # в ССО 3 — уже положительная (п. 4)
+
+
+def test_not_certified_with_open_works() -> None:
+    view = make_view([grade(7, okr=1)], works=[work(1, True), work(2, False), work(1, False, PRAC, failed=True)])
     assert not view.ok
-    assert view.reasons() == ["ОКР на 3 (нужно от 4)"]
+    assert view.reasons() == ["не зачтены ЛР 2, ПР 1"]
 
 
-def test_not_certified_with_pending_works() -> None:
-    view = make_view(grades=[grade(7, okr=1)], works=[work(1, True), work(2, False), work(1, False, PRAC)])
-    assert not view.ok
-    assert view.reasons() == ["не защищены ЛР 2, ПР 1"]
+def test_project_must_be_defended() -> None:
+    assert make_view([grade(8, okr=1)], project=True).reasons() == ["курсовой проект не защищён"]
+    assert make_view([grade(8, okr=1)], project=True, project_grade=2).reasons() == ["курсовой на 2 (нужно от 3)"]
 
 
-def test_certified_when_all_done() -> None:
-    view = make_view(grades=[grade(8), grade(6, okr=1, gid=2)], works=[work(1, True)])
-    assert view.ok
-    assert view.avg == 7  # ОКР входит в средний
-    assert [g.value for g in view.regular] == [8]
+def test_exam_admission_and_average_final() -> None:
+    view = make_view([grade(7), grade(7, okr=1, gid=2)], control=EXAM)
+    assert view.admitted and view.final is None
+    # 3→5; 4–5→6 (5,5 и 6); 6–7→7; 8–9→8; 10→9 (8,5)
+    assert view.exam_table() == [(3, 3, 5), (4, 5, 6), (6, 7, 7), (8, 9, 8), (10, 10, 9)]
+    done = make_view([grade(7), grade(7, okr=1, gid=2)], control=EXAM, exam_grade=10)
+    assert done.final.kind == "grade" and done.final.value == 9  # (7 + 10) / 2 = 8,5 → 9
+    assert done.status_icon == "🏁"
+
+
+def test_exam_only_final_mode() -> None:
+    view = make_view([grade(7), grade(7, okr=1, gid=2)], control=EXAM, exam_grade=10, final=FINAL_EXAM)
+    assert view.final.value == 10
+    assert view.exam_table() == []
+
+
+def test_no_admission_without_works_or_semester_grade() -> None:
+    assert not make_view([grade(7, okr=1)], works=[work(1, False)], control=DIFF).admitted
+    assert not make_view([], okr=0, control=EXAM).admitted  # нет отметок за семестр
+
+
+def test_failed_exam_is_debt() -> None:
+    view = make_view([grade(8), grade(8, okr=1, gid=2)], control=EXAM, exam_grade=2)
+    assert view.final.kind == "debt"
+    assert view.reasons() == ["экзамен на 2 — нужна пересдача"]
+    assert view.status_icon == "❌"
+
+
+def test_credit() -> None:
+    assert make_view([grade(8, okr=1)], control=CREDIT, credit=True).final.kind == "pass"
+    failed = make_view([grade(8, okr=1)], control=CREDIT, credit=False)
+    assert failed.final.kind == "debt" and failed.reasons() == ["зачёт не сдан — нужна пересдача"]
+
+
+def test_exemption_from_exam_for_nine_plus() -> None:
+    assert make_view([grade(9), grade(9, okr=1, gid=2)], control=EXAM).can_exempt
+    assert not make_view([grade(8), grade(8, okr=1, gid=2)], control=EXAM).can_exempt
+    assert not make_view([grade(9), grade(9, okr=1, gid=2)], control=DIFF).can_exempt
 
 
 def test_subject_without_okr_needs_only_works() -> None:
-    assert make_view(okr_count=0).ok
-    assert not make_view(okr_count=0, works=[work(1, False)]).ok
+    assert make_view(okr=0).ok
+    assert not make_view(okr=0, works=[work(1, False)]).ok
+
+
+def test_no_exam_subject_is_never_finished_mid_semester() -> None:
+    assert make_view([grade(8)], okr=0).status_icon == "✅"  # не 🏁: семестр ещё идёт
 
 
 def test_multiple_okr_slots() -> None:
-    view = make_view(okr_count=2, grades=[grade(7, okr=1)])
+    view = make_view([grade(7, okr=1)], okr=2)
     assert view.reasons() == ["нет оценки за ОКР №2"]
 
 
-def test_overview_average_of_averages() -> None:
-    a = SubjectView(subj(1, "A"), [grade(10), grade(10), grade(10), grade(10)], [], 4, 10)
-    b = SubjectView(subj(2, "B"), [grade(6)], [], 4, 10)
-    empty = SubjectView(subj(3, "C"), [], [], 4, 10)
-    ov = Overview([a, b, empty])
+def test_overview_average_and_session() -> None:
+    a = SubjectView(subj(1, "A", okr=0, control=EXAM, exam_grade=9), [grade(10), grade(10)], [], 3, 10)
+    b = SubjectView(subj(2, "B", okr=0, control=DIFF, exam_grade=7), [grade(6)], [], 3, 10)
+    c = SubjectView(subj(3, "C", okr=0, control=CREDIT, credit=True), [], [], 3, 10)
+    empty = SubjectView(subj(4, "D", okr=0), [], [], 3, 10)
+    ov = Overview([a, b, c, empty])
     assert ov.avg == 8  # (10 + 6) / 2 — у каждого предмета равный вес
-    assert ov.avg_all == pytest.approx(9.2)
-    assert ov.grades_count == 5
+    assert ov.session_avg == 8  # (9 + 7) / 2
+    assert ov.session_complete
+    assert [v.final.value for v in (a, b)] == [10, 7]  # (10+9)/2=9,5→10; (6+7)/2=6,5→7
+
+
+# ---------------------------------------------------------------- даты сессии
+
+
+TODAY = date(2026, 11, 12)
+
+
+def test_parse_range_numeric_and_words() -> None:
+    assert parse_range("22.12–14.01", TODAY) == (date(2026, 12, 22), date(2027, 1, 14))
+    assert parse_range("с 22 декабря по 14 января", TODAY) == (date(2026, 12, 22), date(2027, 1, 14))
+    assert parse_range("15.01.2027 - 08.02.2027", TODAY) == (date(2027, 1, 15), date(2027, 2, 8))
+    assert parse_range("22.12", TODAY) is None
+    assert parse_range("14.01–22.12", TODAY) is None  # слишком длинно и наоборот
+
+
+def test_phase() -> None:
+    assert phase(TODAY, "2026-12-22", "2027-01-14").kind == "study"
+    assert phase(TODAY, "2026-12-22", "2027-01-14").days == 40
+    assert phase(date(2027, 1, 5), "2026-12-22", "2027-01-14").kind == "session"
+    assert phase(date(2027, 1, 20), "2026-12-22", "2027-01-14", "2027-01-15", "2027-02-08").kind == "holidays"
+    assert phase(date(2027, 2, 20), "2026-12-22", "2027-01-14").kind == "after"
+    assert phase(TODAY, None, None).kind == "unknown"
+
+
+def test_terms() -> None:
+    assert next_term(1, 1) == (1, 2)
+    assert next_term(1, 2) == (2, 1)
+    assert term_for(date(2026, 11, 1)) == 1
+    assert term_for(date(2027, 3, 1)) == 2
 
 
 # ---------------------------------------------------------------- время и напоминания
@@ -268,40 +422,51 @@ def ts(y: int, m: int, d: int, hh: int, mm: int = 0, tz: str = "Europe/Minsk") -
 
 def make_user(**kw: object) -> User:
     base = dict(
-        id=1, name="", created_at=ts(2026, 11, 1, 10), onboarded=True, scale=10, pass_mark=4, semester_id=1,
-        remind_every=2, remind_time="20:00", skip_sunday=True, tz="Europe/Minsk", clean_chat=True,
-        panel_msg_id=None, last_data_at=ts(2026, 11, 9, 18), last_reminded_at=None, snooze_until=None, blocked=False,
+        id=1, name="", username=None, created_at=ts(2026, 11, 1, 10), onboarded=True, scale=10, pass_mark=3,
+        semester_id=1, remind_every=2, remind_time="20:00", skip_sunday=True, works_reminders=True,
+        tz="Europe/Minsk", clean_chat=True, panel_msg_id=None, last_data_at=ts(2026, 11, 9, 18),
+        last_reminded_at=None, snooze_until=None, blocked=False, final_mode="avg", calc_mode="sso",
     )  # fmt: skip
     base.update(kw)
     return User(**base)  # type: ignore[arg-type]
 
 
 def test_reminder_waits_for_time_of_day() -> None:
-    user = make_user()  # данные вносили в понедельник 9.11
-    assert reminder_due(user, ts(2026, 11, 11, 19, 59)) is None  # среда, ещё рано
+    user = make_user()
+    assert reminder_due(user, ts(2026, 11, 11, 19, 59)) is None
     assert reminder_due(user, ts(2026, 11, 11, 20, 0)) == "regular"
     assert reminder_due(user, ts(2026, 11, 12, 1, 0)) is None  # ночью не пишем
 
 
 def test_reminder_skips_when_recently_active() -> None:
-    user = make_user(last_data_at=ts(2026, 11, 10, 12))  # вчера вносил
+    user = make_user(last_data_at=ts(2026, 11, 10, 12))
     assert reminder_due(user, ts(2026, 11, 11, 20, 5)) is None
     assert (
         reminder_due(make_user(remind_every=1, last_data_at=ts(2026, 11, 10, 12)), ts(2026, 11, 11, 20, 5)) == "regular"
     )
 
 
+def test_reminder_about_works_even_when_active() -> None:
+    user = make_user(last_data_at=ts(2026, 11, 10, 12))
+    assert reminder_due(user, ts(2026, 11, 11, 20, 5), works_due=True) == "works"
+    off = make_user(last_data_at=ts(2026, 11, 10, 12), works_reminders=False)
+    assert reminder_due(off, ts(2026, 11, 11, 20, 5), works_due=True) is None
+
+
+def test_reminder_paused_on_holidays() -> None:
+    assert reminder_due(make_user(), ts(2026, 11, 11, 20, 5), paused=True) is None
+
+
 def test_reminder_not_twice_in_a_row() -> None:
     user = make_user(last_reminded_at=ts(2026, 11, 11, 20, 0))
     assert reminder_due(user, ts(2026, 11, 11, 21, 0)) is None
-    assert reminder_due(user, ts(2026, 11, 12, 20, 0)) is None  # раз в 2 дня
+    assert reminder_due(user, ts(2026, 11, 12, 20, 0)) is None
     assert reminder_due(user, ts(2026, 11, 13, 20, 0)) == "regular"
 
 
 def test_reminder_skips_sunday() -> None:
-    user = make_user()
     sunday = ts(2026, 11, 15, 20, 0)
-    assert reminder_due(user, sunday) is None
+    assert reminder_due(make_user(), sunday) is None
     assert reminder_due(make_user(skip_sunday=False), sunday) == "regular"
 
 
@@ -311,18 +476,16 @@ def test_reminder_off_and_blocked() -> None:
 
 
 def test_reminder_respects_timezone() -> None:
-    user = make_user(tz="Asia/Novosibirsk")  # UTC+7
+    user = make_user(tz="Asia/Novosibirsk")
     assert reminder_due(user, ts(2026, 11, 11, 20, 0, tz="Asia/Novosibirsk")) == "regular"
-    assert reminder_due(user, ts(2026, 11, 11, 20, 0, tz="Europe/Minsk")) is None  # там уже ночь
+    assert reminder_due(user, ts(2026, 11, 11, 20, 0, tz="Europe/Minsk")) is None
 
 
 def test_snooze() -> None:
     until = ts(2026, 11, 11, 22, 0)
-    user = make_user(snooze_until=until)
-    assert reminder_due(user, until - 60) is None
-    assert reminder_due(user, until) == "snooze"
-    active = make_user(snooze_until=until, last_data_at=until - 600)
-    assert reminder_due(active, until) == "clear_snooze"
+    assert reminder_due(make_user(snooze_until=until), until - 60) is None
+    assert reminder_due(make_user(snooze_until=until), until) == "snooze"
+    assert reminder_due(make_user(snooze_until=until, last_data_at=until - 600), until) == "clear_snooze"
 
 
 @pytest.mark.parametrize(
@@ -344,7 +507,6 @@ def test_parse_tz() -> None:
 
 def test_semester_title() -> None:
     assert semester_title(date(2026, 9, 1)) == "Осень 2026"
-    assert semester_title(date(2027, 1, 15)) == "Осень 2026"
     assert semester_title(date(2027, 2, 9)) == "Весна 2027"
 
 

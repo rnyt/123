@@ -7,12 +7,13 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.callback_answer import CallbackAnswer
 
 from .. import screens
-from ..callbacks import AddGrade, DelGrade, OkrSet, Subj, UndoDelGrade, UndoGrades, UndoOkr
+from ..callbacks import AddGrade, CreditSet, DelGrade, ExamSet, OkrSet, ProjSet, Subj, UndoDelGrade, UndoGrades, UndoOkr
 from ..context import Ctx
 from ..logic import (
     GRADE_FORMS,
     MAX_BATCH,
     MAX_NAME_LEN,
+    clean_short,
     display_name,
     fmt_date,
     fmt_num,
@@ -20,7 +21,7 @@ from ..logic import (
     parse_grades,
     plural,
 )
-from ..models import Subject
+from ..models import CONTROL_LABEL, CONTROLS, Subject
 from ..screens import btn, esc, ex
 from ..states import Inp
 from .common import (
@@ -34,6 +35,7 @@ from .common import (
     go_main,
     go_subject,
     handle_free_text,
+    session_rows,
 )
 
 router = Router(name="subjects")
@@ -89,7 +91,7 @@ async def add_grade_tap(cq: CallbackQuery, callback_data: AddGrade, ctx: Ctx, ca
         ctx.repo, ctx.user, subject.id, [v for _, v in data["added"]], data["before"]
     )
     view = await ctx.repo.view(ctx.user, subject.id)
-    callback_answer.text = f"+{value} → средний {fmt_num(view.avg if view else None)}"
+    callback_answer.text = f"+{value} → за семестр {fmt_num(view.semester_exact if view else None)}"
     if screen:
         await ctx.show(cq, screen)
 
@@ -279,11 +281,12 @@ async def delete_grade(cq: CallbackQuery, callback_data: DelGrade, ctx: Ctx, cal
         callback_answer.text = "Эта оценка уже удалена"
         notice, top = None, []
     else:
-        what = "ОКР " if grade.is_okr else ""
-        notice = f"🗑 Удалена {what}оценка {grade.value} от {fmt_date(grade.created_at, ctx.user.tz)}."
+        what = "ОКР " if grade.is_okr else "за работу " if grade.is_work else ""
+        notice = f"🗑 Удалена оценка {what}{grade.value} от {fmt_date(grade.created_at, ctx.user.tz)}."
         undo = UndoDelGrade(
-            s=grade.subject_id, v=grade.value, o=grade.okr_no or 0, t=grade.created_at, p=callback_data.p
-        )
+            s=grade.subject_id, v=grade.value, o=grade.okr_no or 0, t=grade.created_at, p=callback_data.p,
+            w=grade.work_id or 0,
+        )  # fmt: skip
         top = [[btn(f"↩️ Вернуть {grade.value}", undo)]]
         callback_answer.text = f"Удалил {grade.value}"
     screen = await screens.edit_grades_screen(ctx.repo, ctx.user, callback_data.s, callback_data.p, notice, top)
@@ -303,7 +306,7 @@ async def undo_delete_grade(cq: CallbackQuery, callback_data: UndoDelGrade, ctx:
     notice = None
     if ctx.user.grade_min <= value <= ctx.user.grade_max:
         slot = callback_data.o if 0 < callback_data.o <= subject.okr_count else None
-        await ctx.repo.restore_grade(ctx.user, subject.id, value, slot, callback_data.t)
+        await ctx.repo.restore_grade(ctx.user, subject.id, value, slot, callback_data.t, callback_data.w or None)
         notice = f"↩️ Оценка {value} возвращена."
     screen = await screens.edit_grades_screen(ctx.repo, ctx.user, subject.id, callback_data.p, notice)
     if screen:
@@ -410,3 +413,241 @@ async def delete_subject(cq: CallbackQuery, callback_data: Subj, ctx: Ctx) -> No
         return
     await ctx.repo.delete_subject(ctx.user, subject.id)
     await go_main(cq, ctx, notice=f"🗑 Предмет «{esc(display_name(subject.name))}» удалён.")
+
+
+# ---------------------------------------------------------------- экзамен, зачёт, курсовой
+
+
+async def _session_notice(ctx: Ctx, sid: int, lines: list[str]) -> tuple[str, list]:
+    rows = await session_rows(ctx)
+    if rows:
+        lines.append("🎉 Все экзамены и зачёты сданы! Можно отправить семестр в архив.")
+    return "\n".join(lines), rows
+
+
+@router.callback_query(Subj.filter(F.a == "exam"))
+async def exam_view(cq: CallbackQuery, callback_data: Subj, ctx: Ctx) -> None:
+    screen = await screens.exam_screen(ctx.repo, ctx.user, callback_data.id)
+    if screen is None:
+        await go_subject(cq, ctx, callback_data.id, notice="ℹ️ У предмета нет экзамена — форма выбирается в ⚙️ предмета.")
+        return
+    await ctx.mode(Inp.exam, sid=callback_data.id)
+    await ctx.show(cq, screen)
+
+
+async def _set_exam(event: Event, ctx: Ctx, subject: Subject, value: int | None) -> None:
+    label = CONTROL_LABEL.get(subject.control, "экзамен").capitalize()
+    await ctx.repo.set_session_result(ctx.user, subject.id, exam_grade=value)
+    view = await ctx.repo.view(ctx.user, subject.id)
+    if value is None:
+        notice = f"🗑 Отметка за {label.lower()} убрана."
+    elif value < ctx.user.pass_mark:
+        notice = f"❌ {label}: <b>{value}</b> — академическая задолженность, нужна пересдача."
+    else:
+        final = view.final if view else None
+        tail = f" → итог <b>{final.value}</b>" if final and final.value else ""
+        notice = f"✅ {label}: <b>{value}</b>{tail}"
+    text, rows = await _session_notice(ctx, subject.id, [notice])
+    await go_subject(event, ctx, subject.id, text, rows)
+
+
+@router.callback_query(ExamSet.filter())
+async def exam_set(cq: CallbackQuery, callback_data: ExamSet, ctx: Ctx, callback_answer: CallbackAnswer) -> None:
+    subject = await _subject(cq, ctx, callback_data.s)
+    if subject is None:
+        return
+    value = callback_data.v
+    if value == 0:
+        await _set_exam(cq, ctx, subject, None)
+        return
+    if value == 99:
+        view = await ctx.repo.view(ctx.user, subject.id)
+        if view is None or not view.can_exempt or view.semester_grade is None:
+            callback_answer.text = "Автомат — только при отметке за семестр 9 и выше"
+            return
+        value = view.semester_grade
+        callback_answer.text = "🎉 Поздравляю с автоматом!"
+    elif not ctx.user.grade_min <= value <= ctx.user.grade_max:
+        callback_answer.text = "Такой отметки нет в твоей шкале"
+        return
+    await _set_exam(cq, ctx, subject, value)
+
+
+@router.message(Inp.exam, F.text)
+async def exam_text(message: Message, ctx: Ctx) -> None:
+    data = await ctx.data()
+    subject = await ctx.repo.get_subject(ctx.user, data.get("sid", 0))
+    text = message.text or ""
+    if subject is None or HAS_LETTERS.search(text):
+        await ctx.mode(None, sid=subject.id if subject else 0)
+        await handle_free_text(message, ctx)
+        return
+    values, bad = parse_grades(text, ctx.user.grade_min, ctx.user.grade_max)
+    if bad or len(values) != 1:
+        screen = await screens.exam_screen(
+            ctx.repo, ctx.user, subject.id,
+            notice=f"⚠️ Отправь одну отметку от {ctx.user.grade_min} до {ctx.user.grade_max}.",
+        )  # fmt: skip
+        if screen:
+            await ctx.show(message, screen)
+        return
+    await _set_exam(message, ctx, subject, values[0])
+
+
+@router.callback_query(CreditSet.filter())
+async def credit_set(cq: CallbackQuery, callback_data: CreditSet, ctx: Ctx) -> None:
+    subject = await _subject(cq, ctx, callback_data.s)
+    if subject is None:
+        return
+    value = {1: True, 0: False}.get(callback_data.v)
+    await ctx.repo.set_session_result(ctx.user, subject.id, credit=value)
+    notice = {
+        True: "✅ Зачёт: <b>зачтено</b>",
+        False: "❌ Зачёт: <b>не зачтено</b> — нужна пересдача",
+        None: "🗑 Отметка за зачёт убрана.",
+    }[value]
+    text, rows = await _session_notice(ctx, subject.id, [notice])
+    await go_subject(cq, ctx, subject.id, text, rows)
+
+
+@router.callback_query(Subj.filter(F.a == "proj"))
+async def project_view(cq: CallbackQuery, callback_data: Subj, ctx: Ctx) -> None:
+    screen = await screens.project_screen(ctx.repo, ctx.user, callback_data.id)
+    if screen is None:
+        await go_subject(cq, ctx, callback_data.id, notice="ℹ️ Курсового нет — включить можно в ⚙️ предмета.")
+        return
+    await ctx.mode(Inp.project, sid=callback_data.id)
+    await ctx.show(cq, screen)
+
+
+async def _set_project(event: Event, ctx: Ctx, subject: Subject, value: int | None) -> None:
+    before = await ctx.repo.view(ctx.user, subject.id)
+    await ctx.repo.set_session_result(ctx.user, subject.id, project_grade=value)
+    after = await ctx.repo.view(ctx.user, subject.id)
+    if value is None:
+        notice = "🗑 Отметка за курсовой убрана."
+    elif value < ctx.user.pass_mark:
+        notice = f"❌ Курсовой: <b>{value}</b> — ниже {ctx.user.pass_mark}, дадут новое задание и срок."
+    else:
+        notice = f"📐 Курсовой защищён на <b>{value}</b> ✅"
+    if before and after and not after.simple and fmt_num(before.semester_exact) != fmt_num(after.semester_exact):
+        notice += f" · за семестр {fmt_num(before.semester_exact)} → <b>{fmt_num(after.semester_exact)}</b>"
+    await go_subject(event, ctx, subject.id, notice)
+
+
+@router.callback_query(ProjSet.filter())
+async def project_set(cq: CallbackQuery, callback_data: ProjSet, ctx: Ctx, callback_answer: CallbackAnswer) -> None:
+    subject = await _subject(cq, ctx, callback_data.s)
+    if subject is None:
+        return
+    if callback_data.v and not ctx.user.grade_min <= callback_data.v <= ctx.user.grade_max:
+        callback_answer.text = "Такой отметки нет в твоей шкале"
+        return
+    await _set_project(cq, ctx, subject, callback_data.v or None)
+
+
+@router.message(Inp.project, F.text)
+async def project_text(message: Message, ctx: Ctx) -> None:
+    data = await ctx.data()
+    subject = await ctx.repo.get_subject(ctx.user, data.get("sid", 0))
+    text = message.text or ""
+    if subject is None or HAS_LETTERS.search(text):
+        await ctx.mode(None, sid=subject.id if subject else 0)
+        await handle_free_text(message, ctx)
+        return
+    values, bad = parse_grades(text, ctx.user.grade_min, ctx.user.grade_max)
+    if bad or len(values) != 1:
+        screen = await screens.project_screen(
+            ctx.repo,
+            ctx.user,
+            subject.id,
+            notice=f"⚠️ Отправь одну отметку от {ctx.user.grade_min} до {ctx.user.grade_max}.",
+        )
+        if screen:
+            await ctx.show(message, screen)
+        return
+    await _set_project(message, ctx, subject, values[0])
+
+
+# ---------------------------------------------------------------- форма аттестации, курсовой, сокращение
+
+
+@router.callback_query(Subj.filter(F.a == "ctl"))
+async def set_control(cq: CallbackQuery, callback_data: Subj, ctx: Ctx) -> None:
+    subject = await _subject(cq, ctx, callback_data.id)
+    if subject is None:
+        return
+    control = CONTROLS[min(max(callback_data.n, 0), len(CONTROLS) - 1)]
+    await ctx.repo.update_subject(ctx.user, subject.id, control=control)
+    await _show_settings(cq, ctx, subject.id, f"✅ В сессию: {CONTROL_LABEL[control]}.")
+
+
+@router.callback_query(Subj.filter(F.a == "prj"))
+async def toggle_project(cq: CallbackQuery, callback_data: Subj, ctx: Ctx) -> None:
+    subject = await _subject(cq, ctx, callback_data.id)
+    if subject is None:
+        return
+    await ctx.repo.update_subject(ctx.user, subject.id, project=not subject.project)
+    notice = (
+        "📐 Курсовой проект: есть — отметку ставь кнопкой «📐 Курсовой»."
+        if not subject.project
+        else "📐 Курсового нет."
+    )
+    await _show_settings(cq, ctx, subject.id, notice)
+
+
+@router.callback_query(Subj.filter(F.a == "gen"))
+async def toggle_general(cq: CallbackQuery, callback_data: Subj, ctx: Ctx) -> None:
+    subject = await _subject(cq, ctx, callback_data.id)
+    if subject is None:
+        return
+    await ctx.repo.update_subject(ctx.user, subject.id, general=not subject.general)
+    notice = (
+        "📚 Общеобразовательный: за семестр — простое среднее всех отметок."
+        if not subject.general
+        else "📚 Профессиональный: за семестр — по п. 22 (ОКР и курсовой — отдельными слагаемыми)."
+    )
+    await _show_settings(cq, ctx, subject.id, notice)
+
+
+SHORT_TITLE = "🏷 <b>Сокращение предмета</b>"
+
+
+def _short_body(subject: Subject) -> str:
+    current = f"Сейчас: «{esc(subject.short)}». " if subject.short else ""
+    return (
+        f"{current}Отправь короткое название (до 12 символов), например <code>ТОЭ</code>.\n"
+        "Его можно писать при быстром вводе, и оно видно на кнопках. Чтобы убрать — отправь <code>-</code>"
+    )
+
+
+@router.callback_query(Subj.filter(F.a == "short"))
+async def short_prompt(cq: CallbackQuery, callback_data: Subj, ctx: Ctx) -> None:
+    subject = await _subject(cq, ctx, callback_data.id)
+    if subject is None:
+        return
+    await ctx.mode(Inp.short, sid=subject.id)
+    await ctx.show(cq, screens.prompt_screen(SHORT_TITLE, _short_body(subject), Subj(a="cfg", id=subject.id)))
+
+
+@router.message(Inp.short, F.text)
+async def short_text(message: Message, ctx: Ctx) -> None:
+    data = await ctx.data()
+    subject = await ctx.repo.get_subject(ctx.user, data.get("sid", 0))
+    if subject is None:
+        await go_main(message, ctx, notice=NOT_FOUND)
+        return
+    short = clean_short(message.text or "")
+    others = [s for s in await ctx.repo.list_subjects(ctx.user.id, ctx.user.semester_id) if s.id != subject.id]
+    taken = {norm(s.short) for s in others if s.short} | {norm(display_name(s.name)) for s in others}
+    if short and norm(short) in taken:
+        await ctx.show(
+            message,
+            screens.prompt_screen(
+                SHORT_TITLE, _short_body(subject), Subj(a="cfg", id=subject.id), "⚠️ Такое сокращение уже занято."
+            ),
+        )
+        return
+    await ctx.repo.update_subject(ctx.user, subject.id, short=short)
+    notice = f"🏷 Сокращение: «{esc(short)}»." if short else "🏷 Сокращение убрано."
+    await _show_settings(message, ctx, subject.id, notice)

@@ -8,11 +8,12 @@ from collections.abc import Sequence
 from aiogram.types import CallbackQuery, Message
 
 from .. import screens
-from ..callbacks import UndoGrades, UndoOkr
+from ..callbacks import Arch, UndoGrades, UndoOkr
 from ..context import Ctx
 from ..logic import (
     MAX_BATCH,
     MAX_SUBJECTS,
+    Overview,
     display_name,
     fmt_num,
     match_subjects,
@@ -66,8 +67,9 @@ async def resume_onboarding(event: Event, ctx: Ctx, fresh: bool = False, notice:
         await ctx.mode(OnbSt.subjects)
         screen = await screens.onboarding_subjects(ctx.repo, ctx.user, notice)
     else:
-        await ctx.mode(OnbSt.scale)
-        screen = screens.onboarding_scale(ctx.user, notice)
+        await ctx.mode(OnbSt.course)
+        semester = await ctx.repo.get_semester(ctx.user.id, ctx.user.semester_id)
+        screen = screens.onboarding_course(ctx.user, semester, notice)
     if fresh:
         await ctx.fresh(event, screen)
     else:
@@ -77,10 +79,16 @@ async def resume_onboarding(event: Event, ctx: Ctx, fresh: bool = False, notice:
 def subjects_notice(added: Sequence[Subject], skipped: Sequence[str]) -> str:
     parts = []
     if added:
-        parts.append("✅ Добавлено: " + ", ".join(esc(display_name(s.name)) for s in added))
+        names = [esc(display_name(s.name)) + (f" ({esc(s.short)})" if s.short else "") for s in added]
+        parts.append("✅ Добавлено: " + ", ".join(names))
     if skipped:
         parts.append(f"↪️ Пропущено (уже есть или больше {MAX_SUBJECTS}): " + ", ".join(esc(n) for n in skipped))
     return "\n".join(parts) or "⚠️ Не нашёл названий предметов — отправь их через запятую."
+
+
+def quick_names(subjects: Sequence[Subject]) -> list[str]:
+    """Названия и сокращения — чтобы «ТОЭ 8 9» и «Физика 2 8» разбирались правильно."""
+    return [s.name for s in subjects] + [s.short for s in subjects if s.short]
 
 
 async def looks_like_grades(ctx: Ctx, text: str) -> bool:
@@ -90,7 +98,7 @@ async def looks_like_grades(ctx: Ctx, text: str) -> bool:
     оставалась названием). Несколько строк — хватит одной строки «предмет + оценки».
     """
     subjects = await ctx.repo.list_subjects(ctx.user.id, ctx.user.semester_id)
-    names = [s.name for s in subjects]
+    names = quick_names(subjects)
     segments = split_segments(text)
     for segment in segments:
         quick = parse_quick(segment, ctx.user.grade_min, ctx.user.grade_max, names)
@@ -102,10 +110,17 @@ async def looks_like_grades(ctx: Ctx, text: str) -> bool:
 
 def bad_grades_notice(bad: Sequence[str], ctx: Ctx) -> str:
     shown = ", ".join(f"«{esc(truncate(b, 12))}»" for b in bad[:5])
+    e = ex(ctx.user)
     return (
-        f"⚠️ Не понял оценки: {shown}. Нужны целые числа от {ctx.user.grade_min} "
-        f"до {ctx.user.grade_max}, например <code>{ex(ctx.user).a} {ex(ctx.user).b}</code>."
+        f"⚠️ Не понял оценки: {shown}. Нужны числа от {ctx.user.grade_min} до {ctx.user.grade_max}, "
+        f"например <code>{e.a} {e.b}</code> или слитно <code>{e.glued}</code>."
     )
+
+
+async def session_rows(ctx: Ctx) -> list[Row]:
+    """Если все экзамены и зачёты сданы — кнопка «в архив»."""
+    ov = Overview(await ctx.repo.views(ctx.user))
+    return [[btn("🗂 Все экзамены сданы — в архив", Arch(a="ask"))]] if ov.session_complete else []
 
 
 async def apply_grades(event: Event, ctx: Ctx, subject: Subject, values: Sequence[int]) -> None:
@@ -117,12 +132,12 @@ async def apply_grades(event: Event, ctx: Ctx, subject: Subject, values: Sequenc
     ids = await ctx.repo.add_grades(ctx.user, subject.id, values)
     after = await ctx.repo.view(ctx.user, subject.id)
     pluses = ", ".join(f"+{v}" for v in values)
-    old_avg = before.avg if before else None
-    new_avg = after.avg if after else None
-    if old_avg is not None and fmt_num(old_avg) == fmt_num(new_avg):
-        change = f"средний не изменился: <b>{fmt_num(new_avg)}</b>"
+    old = before.semester_exact if before else None
+    new = after.semester_exact if after else None
+    if old is not None and fmt_num(old) == fmt_num(new):
+        change = f"за семестр не изменилось: <b>{fmt_num(new)}</b>"
     else:
-        change = f"средний {fmt_num(old_avg)} → <b>{fmt_num(new_avg)}</b>"
+        change = f"за семестр {fmt_num(old)} → <b>{fmt_num(new)}</b>"
     notice = f"✅ <b>{esc(display_name(subject.name))}</b>: {pluses} · {change}"
     undo = [[btn("↩️ Отменить", UndoGrades(s=subject.id, a=ids[0], b=ids[-1]))]]
     await go_subject(event, ctx, subject.id, notice, undo)
@@ -161,7 +176,7 @@ async def apply_okr(event: Event, ctx: Ctx, subject: Subject, value: int, slot: 
     if value >= ctx.user.pass_mark:
         status = "✅ сдана"
     else:
-        status = f"❌ ниже {ctx.user.pass_mark} — пока не аттестован"
+        status = f"❌ ниже {ctx.user.pass_mark} — пересдача в течение двух недель"
     was = f" (было {previous})" if previous is not None else ""
     notice = f"📌 <b>{name}</b>: {label} — <b>{value}</b> {status}{was}"
     undo = [[btn("↩️ Отменить", UndoOkr(s=subject.id, n=slot, v=previous or 0))]]
@@ -169,7 +184,7 @@ async def apply_okr(event: Event, ctx: Ctx, subject: Subject, value: int, slot: 
 
 
 async def handle_free_text(message: Message, ctx: Ctx) -> None:
-    """Быстрый ввод: «физ 8 9», «8 9», «физ окр 7», «физ»."""
+    """Быстрый ввод: «физ 8 9», «8 9», «физра 10910», «физ окр 7», «физ», несколько строк."""
     if not ctx.user.onboarded:
         await resume_onboarding(message, ctx, notice="Давай сначала закончим настройку 🙂")
         return
@@ -183,7 +198,7 @@ async def handle_free_text(message: Message, ctx: Ctx) -> None:
     if sum(1 for seg in segments if HAS_DIGITS.search(seg) and HAS_LETTERS.search(seg)) >= 2:
         await handle_multi(message, ctx, segments, subjects)
         return
-    quick = parse_quick(text, ctx.user.grade_min, ctx.user.grade_max, [s.name for s in subjects])
+    quick = parse_quick(text, ctx.user.grade_min, ctx.user.grade_max, quick_names(subjects))
     data = await ctx.data()
     current = next((s for s in subjects if s.id == data.get("sid")), None)
 
@@ -254,14 +269,14 @@ async def handle_free_text(message: Message, ctx: Ctx) -> None:
     e = ex(ctx.user)
     await back(
         f"🤔 Не понял «{esc(truncate(text.strip(), 40))}».\n"
-        f"Примеры: <code>физ {e.a} {e.b}</code> · <code>{e.a} {e.b}</code> · "
+        f"Примеры: <code>физ {e.a} {e.b}</code> · <code>физ {e.glued}</code> · <code>{e.a} {e.b}</code> · "
         f"<code>физ окр {e.okr}</code> · <code>физ</code>"
     )
 
 
 async def handle_multi(message: Message, ctx: Ctx, segments: Sequence[str], subjects: Sequence[Subject]) -> None:
-    """Оценки сразу по нескольким предметам: «физ 8 9, матан 7» или каждая строка — предмет."""
-    names = [s.name for s in subjects]
+    """Оценки сразу по нескольким предметам: каждая строка (или «, предмет») — свой предмет."""
+    names = quick_names(subjects)
     plan: list[tuple[Subject, list[int], bool]] = []
     problems: list[str] = []
     for segment in segments[:MAX_SEGMENTS]:
@@ -290,12 +305,13 @@ async def handle_multi(message: Message, ctx: Ctx, segments: Sequence[str], subj
     batches = [(subject.id, values) for subject, values, okr in plan if not okr]
     ids = await ctx.repo.add_grades_multi(ctx.user, batches) if batches else []
     for subject, values, okr in plan:
-        name = f"{subject_icon(subject.name)} {esc(display_name(subject.name))}"
+        label = subject.short or display_name(subject.name)
+        name = f"{subject_icon(subject.name)} {esc(label)}"
         if not okr:
             lines.append(f"{name}: " + ", ".join(f"+{v}" for v in values))
             continue
         if subject.okr_count == 0:
-            problems.append(f"<code>{esc(display_name(subject.name))} окр</code> — в предмете нет ОКР")
+            problems.append(f"<code>{esc(label)} окр</code> — в предмете нет ОКР")
             continue
         slot = await free_okr_slot(ctx, subject)
         if slot is None:
@@ -303,9 +319,9 @@ async def handle_multi(message: Message, ctx: Ctx, segments: Sequence[str], subj
             continue
         previous = await ctx.repo.set_okr(ctx.user, subject.id, slot, values[0])
         mark_ = "✅" if values[0] >= ctx.user.pass_mark else "❌"
-        label = "ОКР" if subject.okr_count == 1 else f"ОКР №{slot}"
+        label_okr = "ОКР" if subject.okr_count == 1 else f"ОКР №{slot}"
         was = f" (было {previous})" if previous is not None else ""
-        lines.append(f"{name}: {label} — {values[0]} {mark_}{was}")
+        lines.append(f"{name}: {label_okr} — {values[0]} {mark_}{was}")
 
     notice_lines = []
     if lines:
