@@ -11,6 +11,7 @@ from .. import clock, screens
 from ..callbacks import Onb
 from ..context import Ctx
 from ..logic import SCALES, remind_every_label, split_names
+from ..screens import ex
 from ..states import OnbSt
 from .common import go_main, resume_onboarding, subjects_notice
 
@@ -171,7 +172,7 @@ async def onb_done(cq: CallbackQuery, ctx: Ctx, callback_answer: CallbackAnswer)
             [
                 "🎉 <b>Готово!</b> Это твоё главное меню.",
                 "• Нажми на предмет — там оценки, ОКР, лабораторные и практические.",
-                "• Или пиши прямо в чат: <code>физ 8 9</code>.",
+                f"• Или пиши прямо в чат: <code>физ {ex(ctx.user).a} {ex(ctx.user).b}</code>.",
                 f"🔔 Напомню внести оценки ({reminders}), если сам не будешь — настроить можно в ⚙️.",
                 "🧹 Твои сообщения я убираю, чтобы в чате оставалось одно аккуратное меню.",
             ]

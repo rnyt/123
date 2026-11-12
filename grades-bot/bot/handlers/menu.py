@@ -8,9 +8,9 @@ from aiogram.types import CallbackQuery, Message
 from .. import clock, screens
 from ..callbacks import Nav, Pick
 from ..context import Ctx
-from ..logic import SNOOZE_SECONDS, fmt_time, match_subjects, parse_quick, split_names
+from ..logic import SNOOZE_SECONDS, fmt_time, split_names
 from ..states import Inp
-from .common import NOT_FOUND, apply_grades, apply_okr, go_main, handle_free_text, subjects_notice
+from .common import NOT_FOUND, apply_grades, apply_okr, go_main, handle_free_text, looks_like_grades, subjects_notice
 
 router = Router(name="menu")
 
@@ -53,9 +53,7 @@ async def nav_add_subjects(cq: CallbackQuery, ctx: Ctx) -> None:
 @router.message(Inp.subjects, F.text)
 async def add_subjects_text(message: Message, ctx: Ctx) -> None:
     text = message.text or ""
-    subjects = await ctx.repo.list_subjects(ctx.user.id, ctx.user.semester_id)
-    quick = parse_quick(text, ctx.user.grade_min, ctx.user.grade_max, [s.name for s in subjects])
-    if len(quick.values) >= 2 and not quick.bad and len(match_subjects(quick.query, subjects)) == 1:
+    if await looks_like_grades(ctx, text):
         # «физ 8 9» вместо названия нового предмета — это явно оценки, а не предмет.
         await ctx.mode()
         await handle_free_text(message, ctx)

@@ -21,10 +21,11 @@ from ..logic import (
     plural,
 )
 from ..models import Subject
-from ..screens import btn, esc
+from ..screens import btn, esc, ex
 from ..states import Inp
 from .common import (
     HAS_LETTERS,
+    MAX_MULTI,
     NOT_FOUND,
     Event,
     apply_grades,
@@ -156,13 +157,18 @@ async def add_grades_text(message: Message, ctx: Ctx) -> None:
 
 @router.callback_query(UndoGrades.filter())
 async def undo_grades(cq: CallbackQuery, callback_data: UndoGrades, ctx: Ctx) -> None:
-    if not 0 <= callback_data.b - callback_data.a < MAX_BATCH:
-        await go_subject(cq, ctx, callback_data.s)
+    several = callback_data.s == 0  # оценки в нескольких предметах сразу
+    limit = MAX_MULTI if several else MAX_BATCH
+    if not 0 <= callback_data.b - callback_data.a < limit:
+        await go_main(cq, ctx)
         return
     ids = list(range(callback_data.a, callback_data.b + 1))
-    removed = await ctx.repo.delete_grades(ctx.user, callback_data.s, ids)
+    removed = await ctx.repo.delete_grades(ctx.user, None if several else callback_data.s, ids)
     notice = f"↩️ Отменено: убрал {plural(removed, GRADE_FORMS)}." if removed else "↩️ Уже отменено."
-    await go_subject(cq, ctx, callback_data.s, notice)
+    if several:
+        await go_main(cq, ctx, notice=notice)
+    else:
+        await go_subject(cq, ctx, callback_data.s, notice)
 
 
 # ---------------------------------------------------------------- ОКР
@@ -218,7 +224,7 @@ async def okr_text(message: Message, ctx: Ctx) -> None:
     if bad or len(values) != 1:
         screen = await screens.okr_screen(
             ctx.repo, ctx.user, subject.id, slot,
-            notice=f"⚠️ Отправь одну оценку числом от {ctx.user.grade_min} до {ctx.user.grade_max}, например <code>7</code>.",
+            notice=f"⚠️ Отправь одну оценку числом от {ctx.user.grade_min} до {ctx.user.grade_max}, например <code>{ex(ctx.user).okr}</code>.",
         )  # fmt: skip
         if screen:
             await ctx.show(message, screen)

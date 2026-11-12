@@ -478,3 +478,47 @@ def test_all_buttons_fit_telegram_limit() -> None:
     ):
         InlineKeyboardButton(text="x", callback_data=data.pack())
         assert len(data.pack().encode()) <= 64
+
+
+async def test_many_subjects_in_one_message(env) -> None:
+    c = env.client
+    await onboard(c)
+    await c.send("физ 8 9, матан 7\nпрог окр 6\nхимия 5\nангл 10")
+    text = c.text
+    assert "Записал" in text
+    assert "⚛️ Физика: +8, +9" in text and "📐 Высшая математика: +7" in text
+    assert "💻 Программирование: ОКР — 6 ✅" in text
+    assert "🇬🇧 Английский язык: +10" in text
+    assert "<code>химия 5</code> — нет такого предмета" in text
+    await c.press("Отменить оценки")
+    assert "убрал 4 оценки" in c.text
+    views = {v.name: v for v in await env.repo.views(await env.repo.get_user(c.id))}
+    assert views["Физика"].values == [] and views["Программирование"].values == [6]  # ОКР осталась
+
+
+async def test_numbers_then_subject_with_comma_is_single_entry(env) -> None:
+    c = env.client
+    await onboard(c)
+    await c.send("8 9, физ")
+    assert "Физика</b>: +8, +9" in c.text
+
+
+async def test_weekly_trend_on_dashboard(env) -> None:
+    c = env.client
+    await onboard(c)
+    await c.send("физ 6 6")
+    env.clock.advance(days=8)
+    await c.send("физ 10 10")
+    await c.press("⬅️ Меню")
+    assert "🗓 За неделю: +2 оценки · средний ▲2,00" in c.text  # было 6,00 → стало 8,00
+
+
+async def test_add_works_screen_understands_grades(env) -> None:
+    c = env.client
+    await onboard(c)
+    await c.send("прог")
+    await c.press("+ Лабораторная")
+    await c.send("физ 8 9")  # перепутал экран
+    assert "Физика</b>: +8, +9" in c.text
+    view = next(v for v in await env.repo.views(await env.repo.get_user(c.id)) if v.name == "Программирование")
+    assert view.works == []

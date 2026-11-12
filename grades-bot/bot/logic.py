@@ -429,6 +429,14 @@ def parse_quick(text: str, low: int, high: int, subject_names: Sequence[str] = (
     return Quick(query=query, values=values, bad=bad, okr=okr)
 
 
+_SEGMENTS = re.compile(r"\n+|[,;]\s*(?=[^\W\d_])")
+
+
+def split_segments(text: str) -> list[str]:
+    """«физ 8 9, матан 7» или по строкам -> ['физ 8 9', 'матан 7']. «8, 9» не делится."""
+    return [part.strip() for part in _SEGMENTS.split(text) if part and part.strip()]
+
+
 # ---------------------------------------------------------------- сводка по предмету
 
 
@@ -591,6 +599,15 @@ class Overview:
     def avg_all(self) -> float | None:
         """Среднее по всем оценкам подряд."""
         return mean(value for v in self.views for value in v.values)
+
+    def avg_before(self, ts: int) -> float | None:
+        """Каким был средний балл на момент ts — для динамики «за неделю»."""
+        return mean(
+            avg for v in self.views if (avg := mean(g.value for g in v.grades if g.created_at < ts)) is not None
+        )
+
+    def added_since(self, ts: int) -> int:
+        return sum(1 for v in self.views for g in v.grades if g.created_at >= ts)
 
     @property
     def grades_count(self) -> int:

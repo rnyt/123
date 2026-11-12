@@ -15,7 +15,7 @@ from ..logic import MAX_NAME_LEN, MAX_WORKS_PER_SUBJECT, WORK_FORMS, plural, spl
 from ..models import LAB, PRAC, WORK_KINDS, Subject, Work
 from ..screens import btn, esc, works_range
 from ..states import Inp
-from .common import NOT_FOUND, Event, go_main, go_subject
+from .common import NOT_FOUND, Event, go_main, go_subject, handle_free_text, looks_like_grades
 
 router = Router(name="works")
 
@@ -93,6 +93,10 @@ async def add_works_text(message: Message, ctx: Ctx) -> None:
         await go_main(message, ctx, notice=NOT_FOUND)
         return
     text = (message.text or "").strip()
+    if await looks_like_grades(ctx, text):
+        await ctx.mode(None, sid=subject.id)
+        await handle_free_text(message, ctx)
+        return
     if re.fullmatch(r"\d{1,2}", text):
         count = int(text)
         if not 1 <= count <= 30:

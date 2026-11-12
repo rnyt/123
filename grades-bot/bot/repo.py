@@ -340,6 +340,22 @@ class Repo:
             await self._touch(db, user.id, ts)
         return ids
 
+    async def add_grades_multi(self, user: User, batches: Sequence[tuple[int, Sequence[int]]]) -> list[int]:
+        """Оценки сразу в несколько предметов одной транзакцией (id идут подряд — удобно отменять)."""
+        ts = clock.now()
+        ids: list[int] = []
+        async with self.tx() as db:
+            for sid, values in batches:
+                for value in values:
+                    cur = await db.execute(
+                        "INSERT INTO grades (subject_id, value, okr_no, created_at) VALUES (?, ?, NULL, ?)",
+                        (sid, value, ts),
+                    )
+                    ids.append(cur.lastrowid)  # type: ignore[arg-type]
+            if ids:
+                await self._touch(db, user.id, ts)
+        return ids
+
     async def set_okr(self, user: User, sid: int, slot: int, value: int | None) -> int | None:
         """Ставит (или убирает при value=None) оценку за ОКР №slot. Возвращает прежнюю."""
         ts = clock.now()
@@ -368,14 +384,17 @@ class Repo:
             await db.execute("DELETE FROM grades WHERE id = ?", (gid,))
         return _grade(row)
 
-    async def delete_grades(self, user: User, sid: int, ids: Sequence[int]) -> int:
+    async def delete_grades(self, user: User, sid: int | None, ids: Sequence[int]) -> int:
+        """Удаляет обычные оценки по id (для отмены). sid=None — в любом предмете пользователя."""
         if not ids:
             return 0
+        subject_filter = "" if sid is None else " AND subject_id = ?"
+        params = (*ids, *([] if sid is None else [sid]), user.id)
         async with self.tx() as db:
             cur = await db.execute(
-                f"DELETE FROM grades WHERE id IN ({self._marks(ids)}) AND subject_id = ?"
+                f"DELETE FROM grades WHERE id IN ({self._marks(ids)}){subject_filter}"
                 " AND okr_no IS NULL AND subject_id IN (SELECT id FROM subjects WHERE user_id = ?)",
-                (*ids, sid, user.id),
+                params,
             )
         return cur.rowcount
 

@@ -68,7 +68,9 @@ def load_config() -> Config:
     if not token:
         raise SystemExit(TOKEN_HELP)
     if not re.fullmatch(r"\d+:[A-Za-z0-9_-]+", token):
-        raise SystemExit("BOT_TOKEN выглядит неправильно: он должен быть вида 1234567890:AAH... (его выдаёт @BotFather).")
+        raise SystemExit(
+            "BOT_TOKEN выглядит неправильно: он должен быть вида 1234567890:AAH... (его выдаёт @BotFather)."
+        )
 
     allowed = frozenset(int(part) for part in re.split(r"[,;\s]+", os.getenv("ALLOWED_USERS", "")) if part.isdigit())
     try:

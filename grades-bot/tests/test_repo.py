@@ -126,7 +126,11 @@ async def test_move_subject(repo: Repo) -> None:
     user = await new_user(repo)
     added, _ = await repo.add_subjects(user, ["А-предмет", "Б-предмет", "В-предмет"])
     assert await repo.move_subject(user, added[2].id, -1)
-    assert [s.name for s in await repo.list_subjects(user.id, user.semester_id)] == ["А-предмет", "В-предмет", "Б-предмет"]
+    assert [s.name for s in await repo.list_subjects(user.id, user.semester_id)] == [
+        "А-предмет",
+        "В-предмет",
+        "Б-предмет",
+    ]
     assert not await repo.move_subject(user, added[0].id, -1)
 
 

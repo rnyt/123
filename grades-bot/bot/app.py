@@ -7,14 +7,17 @@ from contextlib import suppress
 
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramAPIError
+from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import BaseStorage
 from aiogram.types import BotCommand, ErrorEvent
 from aiogram.utils.callback_answer import CallbackAnswerMiddleware
 
+from .callbacks import Nav
 from .handlers import build_router
 from .middlewares import ContextMiddleware
 from .panel import Panel
 from .repo import Repo
+from .screens import Screen, btn, markup
 
 log = logging.getLogger(__name__)
 
@@ -31,9 +34,17 @@ DESCRIPTION = (
     "Нажми «Старт» 👇"
 )
 SHORT_DESCRIPTION = "Средний балл, ОКР, лабораторные и аттестация — в одном чате."
+ERROR_TEXT = "⚠️ Ой, что-то пошло не так. Попробуй ещё раз — или открой меню."
 
 
-async def on_error(event: ErrorEvent, bot: Bot) -> bool:
+async def on_error(
+    event: ErrorEvent,
+    bot: Bot,
+    repo: Repo | None = None,
+    panel: Panel | None = None,
+    state: FSMContext | None = None,
+) -> bool:
+    """Любая неожиданная ошибка: пишем в лог, а пользователю — понятное сообщение-меню."""
     log.error("Ошибка при обработке апдейта: %r", event.exception, exc_info=event.exception)
     update = event.update
     chat_id = None
@@ -41,9 +52,21 @@ async def on_error(event: ErrorEvent, bot: Bot) -> bool:
         chat_id = update.message.chat.id
     elif update.callback_query is not None:
         chat_id = update.callback_query.from_user.id
-    if chat_id is not None:
+    if chat_id is None:
+        return True
+    if state is not None:
         with suppress(Exception):
-            await bot.send_message(chat_id, "⚠️ Ой, что-то пошло не так. Попробуй ещё раз или нажми /menu.")
+            await state.clear()
+    screen = Screen(ERROR_TEXT, markup([[btn("🏠 Меню", Nav(to="main"))]]))
+    try:
+        user = await repo.get_user(chat_id) if repo else None
+        if user is not None and panel is not None:
+            await panel.send(bot, user, screen)  # сообщение об ошибке само становится меню
+            return True
+    except Exception:  # noqa: BLE001
+        log.debug("Не удалось показать ошибку панелью", exc_info=True)
+    with suppress(Exception):
+        await bot.send_message(chat_id, ERROR_TEXT, reply_markup=screen.kb)
     return True
 
 

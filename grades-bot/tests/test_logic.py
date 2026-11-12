@@ -286,7 +286,9 @@ def test_reminder_waits_for_time_of_day() -> None:
 def test_reminder_skips_when_recently_active() -> None:
     user = make_user(last_data_at=ts(2026, 11, 10, 12))  # вчера вносил
     assert reminder_due(user, ts(2026, 11, 11, 20, 5)) is None
-    assert reminder_due(make_user(remind_every=1, last_data_at=ts(2026, 11, 10, 12)), ts(2026, 11, 11, 20, 5)) == "regular"
+    assert (
+        reminder_due(make_user(remind_every=1, last_data_at=ts(2026, 11, 10, 12)), ts(2026, 11, 11, 20, 5)) == "regular"
+    )
 
 
 def test_reminder_not_twice_in_a_row() -> None:

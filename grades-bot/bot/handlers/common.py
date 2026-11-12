@@ -17,17 +17,22 @@ from ..logic import (
     fmt_num,
     match_subjects,
     parse_quick,
+    split_segments,
+    subject_icon,
     truncate,
 )
 from ..models import Subject
-from ..screens import Row, btn, esc
+from ..screens import Row, btn, esc, ex
 from ..states import Inp, OnbSt
 
 Event = Message | CallbackQuery
 
 NOT_FOUND = "⚠️ Предмет не найден — возможно, он удалён или в архиве."
 HAS_LETTERS = re.compile(r"[^\W\d_]")
+HAS_DIGITS = re.compile(r"[0-9]")
 MAX_PICK = 15  # столько оценок влезает в кнопку выбора предмета (лимит Telegram — 64 байта)
+MAX_SEGMENTS = 15  # предметов в одном сообщении
+MAX_MULTI = 40  # оценок в одном сообщении по нескольким предметам
 
 
 async def go_main(
@@ -78,11 +83,23 @@ def subjects_notice(added: Sequence[Subject], skipped: Sequence[str]) -> str:
     return "\n".join(parts) or "⚠️ Не нашёл названий предметов — отправь их через запятую."
 
 
+async def looks_like_grades(ctx: Ctx, text: str) -> bool:
+    """«физ 8 9» на экране, где ждут название, — это оценки, а не название."""
+    subjects = await ctx.repo.list_subjects(ctx.user.id, ctx.user.semester_id)
+    quick = parse_quick(text, ctx.user.grade_min, ctx.user.grade_max, [s.name for s in subjects])
+    if len(split_segments(text)) > 1 and sum(bool(HAS_DIGITS.search(x)) for x in split_segments(text)) >= 2:
+        return any(
+            len(match_subjects(parse_quick(x, ctx.user.grade_min, ctx.user.grade_max).query, subjects)) == 1
+            for x in split_segments(text)
+        )
+    return len(quick.values) >= 2 and not quick.bad and len(match_subjects(quick.query, subjects)) == 1
+
+
 def bad_grades_notice(bad: Sequence[str], ctx: Ctx) -> str:
     shown = ", ".join(f"«{esc(truncate(b, 12))}»" for b in bad[:5])
     return (
         f"⚠️ Не понял оценки: {shown}. Нужны целые числа от {ctx.user.grade_min} "
-        f"до {ctx.user.grade_max}, например <code>8 9</code>."
+        f"до {ctx.user.grade_max}, например <code>{ex(ctx.user).a} {ex(ctx.user).b}</code>."
     )
 
 
@@ -106,6 +123,15 @@ async def apply_grades(event: Event, ctx: Ctx, subject: Subject, values: Sequenc
     await go_subject(event, ctx, subject.id, notice, undo)
 
 
+async def free_okr_slot(ctx: Ctx, subject: Subject) -> int | None:
+    """Первая ОКР без оценки; если ОКР одна — она; если все выставлены — None."""
+    view = await ctx.repo.view(ctx.user, subject.id)
+    empty = [n for n, grade in (view.okr_slots if view else []) if grade is None]
+    if empty:
+        return empty[0]
+    return 1 if subject.okr_count == 1 else None
+
+
 async def apply_okr(event: Event, ctx: Ctx, subject: Subject, value: int, slot: int | None = None) -> None:
     """Поставить оценку за ОКР (в первую свободную, если номер не указан)."""
     name = esc(display_name(subject.name))
@@ -116,13 +142,8 @@ async def apply_okr(event: Event, ctx: Ctx, subject: Subject, value: int, slot: 
         )  # fmt: skip
         return
     if slot is None:
-        view = await ctx.repo.view(ctx.user, subject.id)
-        empty = [n for n, grade in (view.okr_slots if view else []) if grade is None]
-        if empty:
-            slot = empty[0]
-        elif subject.okr_count == 1:
-            slot = 1
-        else:
+        slot = await free_okr_slot(ctx, subject)
+        if slot is None:
             await ctx.mode(None, sid=subject.id)
             screen = await screens.okr_screen(
                 ctx.repo, ctx.user, subject.id, None, notice="Все ОКР уже выставлены — выбери, какую изменить."
@@ -153,6 +174,10 @@ async def handle_free_text(message: Message, ctx: Ctx) -> None:
         return
 
     text = message.text or ""
+    segments = split_segments(text)
+    if sum(1 for seg in segments if HAS_DIGITS.search(seg) and HAS_LETTERS.search(seg)) >= 2:
+        await handle_multi(message, ctx, segments, subjects)
+        return
     quick = parse_quick(text, ctx.user.grade_min, ctx.user.grade_max, [s.name for s in subjects])
     data = await ctx.data()
     current = next((s for s in subjects if s.id == data.get("sid")), None)
@@ -221,7 +246,67 @@ async def handle_free_text(message: Message, ctx: Ctx) -> None:
             await ctx.show(message, screens.open_pick_screen(matches, quick.query))
             return
 
+    e = ex(ctx.user)
     await back(
         f"🤔 Не понял «{esc(truncate(text.strip(), 40))}».\n"
-        "Примеры: <code>физ 8 9</code> · <code>8 9</code> · <code>физ окр 7</code> · <code>физ</code>"
+        f"Примеры: <code>физ {e.a} {e.b}</code> · <code>{e.a} {e.b}</code> · "
+        f"<code>физ окр {e.okr}</code> · <code>физ</code>"
     )
+
+
+async def handle_multi(message: Message, ctx: Ctx, segments: Sequence[str], subjects: Sequence[Subject]) -> None:
+    """Оценки сразу по нескольким предметам: «физ 8 9, матан 7» или каждая строка — предмет."""
+    names = [s.name for s in subjects]
+    plan: list[tuple[Subject, list[int], bool]] = []
+    problems: list[str] = []
+    for segment in segments[:MAX_SEGMENTS]:
+        quick = parse_quick(segment, ctx.user.grade_min, ctx.user.grade_max, names)
+        shown = f"<code>{esc(truncate(segment, 40))}</code>"
+        matches = match_subjects(quick.query, subjects) if quick.query else []
+        if quick.bad:
+            problems.append(f"{shown} — оценки от {ctx.user.grade_min} до {ctx.user.grade_max}")
+        elif not quick.values:
+            problems.append(f"{shown} — нет оценок")
+        elif not quick.query:
+            problems.append(f"{shown} — не указан предмет")
+        elif len(matches) != 1:
+            problems.append(f"{shown} — " + ("подходит несколько предметов" if matches else "нет такого предмета"))
+        else:
+            plan.append((matches[0], quick.values, quick.okr))
+    if len(segments) > MAX_SEGMENTS:
+        problems.append(f"…и ещё {len(segments) - MAX_SEGMENTS} — за раз не больше {MAX_SEGMENTS} строк")
+
+    total = sum(len(values) for _, values, okr in plan if not okr)
+    if total > MAX_MULTI:
+        await go_main(message, ctx, notice=f"⚠️ Слишком много оценок за раз — не больше {MAX_MULTI}.")
+        return
+
+    lines: list[str] = []
+    batches = [(subject.id, values) for subject, values, okr in plan if not okr]
+    ids = await ctx.repo.add_grades_multi(ctx.user, batches) if batches else []
+    for subject, values, okr in plan:
+        name = f"{subject_icon(subject.name)} {esc(display_name(subject.name))}"
+        if not okr:
+            lines.append(f"{name}: " + ", ".join(f"+{v}" for v in values))
+            continue
+        if subject.okr_count == 0:
+            problems.append(f"<code>{esc(display_name(subject.name))} окр</code> — в предмете нет ОКР")
+            continue
+        slot = await free_okr_slot(ctx, subject)
+        if slot is None:
+            problems.append(f"{name} — все ОКР уже выставлены, поменяй в карточке предмета")
+            continue
+        await ctx.repo.set_okr(ctx.user, subject.id, slot, values[0])
+        mark_ = "✅" if values[0] >= ctx.user.pass_mark else "❌"
+        label = "ОКР" if subject.okr_count == 1 else f"ОКР №{slot}"
+        lines.append(f"{name}: {label} — {values[0]} {mark_}")
+
+    notice_lines = []
+    if lines:
+        notice_lines += ["✅ <b>Записал:</b>", *lines]
+    if problems:
+        if notice_lines:
+            notice_lines.append("")
+        notice_lines += ["⚠️ <b>Не понял</b> (можно нажать, скопировать и поправить):", *problems]
+    top = [[btn("↩️ Отменить оценки", UndoGrades(s=0, a=min(ids), b=max(ids)))]] if ids else []
+    await go_main(message, ctx, notice="\n".join(notice_lines), top_rows=top)

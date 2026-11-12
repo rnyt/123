@@ -51,18 +51,37 @@ from .repo import Repo
 
 Row = list[InlineKeyboardButton]
 
-TIPS = [
-    "Пиши прямо в чат: «физ 8 9» — оценки сразу попадут в физику.",
-    "Отправь просто «8 9» — я спрошу, в какой предмет их записать.",
-    "Названия можно сокращать: «матан», «англ», «оаип» — я пойму.",
-    "«физ окр 7» — так быстро ставится оценка за ОКР.",
-    "Ошибся? Сразу после добавления есть кнопка «↩️ Отменить».",
-    "В карточке предмета видно, сколько оценок нужно до следующего балла.",
-    "Время и частоту напоминаний можно поменять в ⚙️ Настройках.",
-    "Закончился семестр? ⚙️ → 🗂 Семестры: старый уйдёт в архив.",
-    "Своя иконка предмета: поставь эмодзи в начало названия — «🧮 Матан».",
-    "Все оценки можно выгрузить в Excel: ⚙️ → 📤 Экспорт.",
-]
+
+@dataclass(frozen=True, slots=True)
+class Examples:
+    """Примеры оценок для подсказок — под шкалу пользователя (на 5-балльной «8 9» не бывает)."""
+
+    a: int
+    b: int
+    c: int
+    okr: int
+
+
+def ex(user: User) -> Examples:
+    return Examples(4, 5, 3, 4) if user.scale <= 5 else Examples(8, 9, 10, 7)
+
+
+def tips(user: User) -> list[str]:
+    e = ex(user)
+    return [
+        f"Пиши прямо в чат: «физ {e.a} {e.b}» — оценки сразу попадут в физику.",
+        f"Отправь просто «{e.a} {e.b}» — я спрошу, в какой предмет их записать.",
+        "Названия можно сокращать: «матан», «англ», «оаип» — я пойму.",
+        f"«физ окр {e.okr}» — так быстро ставится оценка за ОКР.",
+        f"Оценки за весь день — одним сообщением: «физ {e.a}, матан {e.b}».",
+        "Ошибся? Сразу после добавления есть кнопка «↩️ Отменить».",
+        "В карточке предмета видно, сколько оценок нужно до следующего балла.",
+        "Время и частоту напоминаний можно поменять в ⚙️ Настройках.",
+        "Закончился семестр? ⚙️ → 🗂 Семестры: старый уйдёт в архив.",
+        "Своя иконка предмета: поставь эмодзи в начало названия — «🧮 Матан».",
+        "Все оценки можно выгрузить в Excel: ⚙️ → 📤 Экспорт.",
+    ]
+
 
 TZ_CHOICES: list[tuple[str, str]] = [
     ("Минск", "Europe/Minsk"),
@@ -201,6 +220,20 @@ def _attestation_block(user: User, ov: Overview) -> list[str]:
     return lines
 
 
+def _trend_line(ov: Overview) -> str | None:
+    """«📈 За неделю: +3 оценки · средний ▲0,15»."""
+    week_ago = clock.now() - 7 * 86400
+    fresh = ov.added_since(week_ago)
+    if not fresh:
+        return None
+    line = f"🗓 За неделю: +{plural(fresh, GRADE_FORMS)}"
+    before = ov.avg_before(week_ago)
+    if before is not None and ov.avg is not None and abs(ov.avg - before) >= 0.005:
+        arrow = "▲" if ov.avg > before else "▼"
+        line += f" · средний {arrow}{fmt_num(abs(ov.avg - before))}"
+    return line
+
+
 def subject_button(v: SubjectView, data: CallbackData) -> InlineKeyboardButton:
     status = "✅" if v.ok else "❌"
     return btn(f"{v.icon} {truncate(v.name, 22)} · {fmt_num(v.avg)} {status}", data)
@@ -219,13 +252,16 @@ async def main_screen(repo: Repo, user: User, notice: str | None = None, top_row
         else:
             lines.append(f"📊 Средний балл: <b>{fmt_num(ov.avg)}</b> ≈ {round_half_up(ov.avg)}")
         lines.append(f"📚 {plural(len(views), SUBJECT_FORMS)} · {plural(ov.grades_count, GRADE_FORMS)}")
+        trend = _trend_line(ov)
+        if trend:
+            lines.append(trend)
         if ov.works_total:
             lines.append(
                 f"🔬 Защищено работ: {ov.works_done} из {ov.works_total} {progress_bar(ov.works_done, ov.works_total)}"
             )
         lines.append("")
         lines += _attestation_block(user, ov)
-        lines += ["", f"<i>💡 {random.choice(TIPS)}</i>"]
+        lines += ["", f"<i>💡 {random.choice(tips(user))}</i>"]
 
     rows: list[Row] = list(top_rows)
     rows += adaptive_rows([subject_button(v, Subj(a="v", id=v.id)) for v in views], wide=24, narrow=0)
@@ -360,7 +396,8 @@ def render_subject(user: User, v: SubjectView, notice: str | None, top_rows: Seq
         lines.append("❌ <b>Не аттестован:</b> " + "; ".join(esc(r) for r in v.reasons()))
     if v.avg_below_pass:
         lines.append(f"⚠️ Средний ниже {user.pass_mark} — стоит подтянуть")
-    lines.append("<i>💡 Оценки можно просто отправить сообщением: 8 9</i>")
+    e = ex(user)
+    lines.append(f"<i>💡 Оценки можно просто отправить сообщением: {e.a} {e.b}</i>")
 
     sid = v.id
     rows: list[Row] = list(top_rows)
@@ -396,6 +433,7 @@ async def add_grades_screen(
     v = await repo.view(user, sid)
     if v is None:
         return None
+    e = ex(user)
     lines = [f"➕ <b>Оценки: {subject_title(v)}</b>", ""]
     if added:
         lines.append("✅ Только что: " + ", ".join(map(str, added)))
@@ -407,7 +445,7 @@ async def add_grades_screen(
     lines += [
         "",
         "Нажимай на оценки — каждая сохраняется сразу.",
-        "Или отправь сообщением: <code>8 9 10</code>, <code>8, 9</code> или <code>8/9</code>",
+        f"Или отправь сообщением: <code>{e.a} {e.b} {e.c}</code>, <code>{e.a}, {e.b}</code> или <code>{e.a}/{e.b}</code>",
     ]
     rows = keypad(user, AddGrade, s=sid)
     if added:
@@ -731,16 +769,18 @@ async def stats_screen(repo: Repo, user: User) -> Screen:
 
 
 def help_screen(user: User) -> Screen:
+    e = ex(user)
     reminders = f"{remind_every_label(user.remind_every)} в {user.remind_time}" if user.remind_every else "выключены"
     lines = [
         "❓ <b>Как пользоваться</b>",
         "",
         "<b>Быстрый ввод</b> — просто пиши в чат:",
-        "• <code>физ 8 9</code> — оценки 8 и 9 по физике",
-        "• <code>8 9</code> — спрошу, в какой предмет",
-        "• <code>физ окр 7</code> — оценка за ОКР",
+        f"• <code>физ {e.a} {e.b}</code> — оценки {e.a} и {e.b} по физике",
+        f"• <code>{e.a} {e.b}</code> — спрошу, в какой предмет",
+        f"• <code>физ окр {e.okr}</code> — оценка за ОКР",
         "• <code>физ</code> — открыть предмет",
-        "Разделители любые: пробел, запятая, «/» — <code>8, 9/10</code>.",
+        f"• <code>физ {e.a}, матан {e.b}</code> — сразу в несколько предметов (можно и по строкам)",
+        f"Разделители любые: пробел, запятая, «/» — <code>{e.a}, {e.b}/{e.c}</code>.",
         "Названия можно сокращать: «матан», «англ», «оаип».",
         "",
         "<b>Аттестация</b> ❌ — если в предмете:",

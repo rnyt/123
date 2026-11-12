@@ -8,6 +8,7 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.callback_answer import CallbackAnswer
 
 from ..context import Ctx
+from ..screens import ex
 from .common import go_main, go_subject, handle_free_text
 
 router = Router(name="text")
@@ -28,10 +29,11 @@ async def text_in_unknown_state(message: Message, ctx: Ctx) -> None:
 
 @router.message()
 async def not_text(message: Message, ctx: Ctx) -> None:
+    e = ex(ctx.user)
     if message.voice or message.video_note:
-        notice = "🎙 Голосовые пока не понимаю — напиши текстом, например <code>физ 8 9</code>."
+        notice = f"🎙 Голосовые пока не понимаю — напиши текстом, например <code>физ {e.a} {e.b}</code>."
     else:
-        notice = "🙂 Я понимаю текст и кнопки. Например: <code>физ 8 9</code>."
+        notice = f"🙂 Я понимаю текст и кнопки. Например: <code>физ {e.a} {e.b}</code>."
     data = await ctx.data()
     if ctx.user.onboarded and data.get("sid"):
         await go_subject(message, ctx, int(data["sid"]), notice)
