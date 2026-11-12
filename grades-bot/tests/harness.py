@@ -10,7 +10,7 @@ import itertools
 import re
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from aiogram import Bot, Dispatcher
@@ -118,7 +118,7 @@ class FakeTelegram(BaseSession):
     def _message(self, chat_id: int, mid: int, text: str | None = None) -> Message:
         return Message(
             message_id=mid,
-            date=datetime.now(UTC),
+            date=datetime.now(timezone.utc),
             chat=Chat(id=chat_id, type="private"),
             text=text,
         )
@@ -239,7 +239,7 @@ class Client:
         self.tg.chat(self.id)[mid] = ChatMessage(mid, text, from_bot=False)
         message = Message(
             message_id=mid,
-            date=datetime.now(UTC),
+            date=datetime.now(timezone.utc),
             chat=Chat(id=self.id, type="private"),
             from_user=self.user,
             text=text,
@@ -253,7 +253,7 @@ class Client:
         self.tg.chat(self.id)[mid] = ChatMessage(mid, "<sticker>", from_bot=False)
         message = Message(
             message_id=mid,
-            date=datetime.now(UTC),
+            date=datetime.now(timezone.utc),
             chat=Chat(id=self.id, type="private"),
             from_user=self.user,
             sticker=Sticker(
@@ -270,7 +270,7 @@ class Client:
             chat_instance="test",
             message=Message(
                 message_id=msg.id,
-                date=datetime.now(UTC),
+                date=datetime.now(timezone.utc),
                 chat=Chat(id=self.id, type="private"),
                 text=msg.text,
             ),

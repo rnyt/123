@@ -9,6 +9,7 @@ import sys
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import PRODUCTION, TelegramAPIServer
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 
@@ -17,6 +18,7 @@ from .app import build_dispatcher
 from .commands import setup_bot_profile
 from .config import Config, load_config
 from .db import connect
+from .lowmem import is_enabled as low_memory
 from .reminders import reminder_loop
 from .repo import Repo
 from .storage import SQLiteStorage
@@ -28,7 +30,8 @@ async def run(config: Config) -> None:
     db = await connect(config.db_path)
     repo = Repo(db, default_tz=config.default_tz)
     storage = SQLiteStorage(db, repo.lock)
-    session = AiohttpSession(proxy=config.proxy) if config.proxy else AiohttpSession()
+    api = TelegramAPIServer.from_base(config.api_url) if config.api_url else PRODUCTION
+    session = AiohttpSession(proxy=config.proxy, api=api)
     bot = Bot(
         token=config.bot_token,
         session=session,
@@ -43,6 +46,9 @@ async def run(config: Config) -> None:
         await setup_bot_profile(bot, await access.owner_id())
         tasks.append(asyncio.create_task(reminder_loop(bot, repo, dp["panel"], storage, config.reminder_check_seconds)))
         log.info("Бот @%s запущен. Владелец: %s. База: %s", me.username, config.owner, config.db_path)
+        log.info(
+            "✅ Всё работает: открой t.me/%s и нажми /start. Бот отвечает, пока запущен этот процесс.", me.username
+        )
 
     async def on_shutdown() -> None:
         for task in tasks:
@@ -52,6 +58,7 @@ async def run(config: Config) -> None:
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     try:
+        log.info("Подключаюсь к Telegram…")
         try:
             await bot.get_me()
         except TelegramUnauthorizedError:
@@ -75,10 +82,16 @@ def main() -> None:
         stream=sys.stdout,
     )
     logging.getLogger("aiogram.event").setLevel(logging.WARNING)
+    log.info("Python %s · экономия памяти: %s", sys.version.split()[0], "вкл" if low_memory() else "выкл")
     try:
         asyncio.run(run(config))
     except KeyboardInterrupt:
         pass
+    except Exception:
+        log.exception(
+            "❌ Бот остановился из-за ошибки (подробности ниже). Пришли этот текст тому, кто настраивал бота."
+        )
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

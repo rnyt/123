@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -33,7 +33,7 @@ class FakeClock:
 
     @property
     def utc(self) -> datetime:
-        return datetime.fromtimestamp(self.ts, UTC)
+        return datetime.fromtimestamp(self.ts, timezone.utc)
 
 
 @pytest.fixture

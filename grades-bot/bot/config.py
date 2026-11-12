@@ -13,9 +13,10 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 TOKEN_HELP = (
     "Не задан BOT_TOKEN.\n"
     "1) Создай бота у @BotFather в Telegram (команда /newbot) и скопируй токен.\n"
-    "2) Запусти start.bat (Windows) или ./start.sh — бот сам спросит токен.\n"
-    "   Или скопируй .env.example в .env и впиши токен в строку BOT_TOKEN=...\n"
-    "3) Запусти снова: python -m bot"
+    "2) Впиши его в файл .env рядом с app.py строкой BOT_TOKEN=1234567890:AAH...\n"
+    "   (на хостинге: Files → .env; на компьютере можно просто запустить start.bat или ./start.sh —\n"
+    "   бот сам спросит токен и создаст .env).\n"
+    "3) Запусти бота снова."
 )
 
 
@@ -52,6 +53,7 @@ class Config:
     allowed_users: frozenset[int] = frozenset()
     owner: str = "ztpst"
     proxy: str | None = None
+    api_url: str | None = None
     log_level: str = "INFO"
     reminder_check_seconds: int = 60
 
@@ -112,6 +114,7 @@ def load_config() -> Config:
         allowed_users=allowed,
         owner=os.getenv("OWNER", "ztpst").strip().lstrip("@") or "ztpst",
         proxy=os.getenv("PROXY_URL", "").strip() or None,
+        api_url=os.getenv("TELEGRAM_API_URL", "").strip().rstrip("/") or None,
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         reminder_check_seconds=check_every,
     )
