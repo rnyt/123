@@ -84,15 +84,20 @@ def subjects_notice(added: Sequence[Subject], skipped: Sequence[str]) -> str:
 
 
 async def looks_like_grades(ctx: Ctx, text: str) -> bool:
-    """«физ 8 9» на экране, где ждут название, — это оценки, а не название."""
+    """«физ 8 9» на экране, где ждут название, — это оценки, а не название.
+
+    Одна строка — нужно хотя бы две оценки и однозначный предмет (чтобы «Физика 2»
+    оставалась названием). Несколько строк — хватит одной строки «предмет + оценки».
+    """
     subjects = await ctx.repo.list_subjects(ctx.user.id, ctx.user.semester_id)
-    quick = parse_quick(text, ctx.user.grade_min, ctx.user.grade_max, [s.name for s in subjects])
-    if len(split_segments(text)) > 1 and sum(bool(HAS_DIGITS.search(x)) for x in split_segments(text)) >= 2:
-        return any(
-            len(match_subjects(parse_quick(x, ctx.user.grade_min, ctx.user.grade_max).query, subjects)) == 1
-            for x in split_segments(text)
-        )
-    return len(quick.values) >= 2 and not quick.bad and len(match_subjects(quick.query, subjects)) == 1
+    names = [s.name for s in subjects]
+    segments = split_segments(text)
+    for segment in segments:
+        quick = parse_quick(segment, ctx.user.grade_min, ctx.user.grade_max, names)
+        enough = len(quick.values) >= (1 if len(segments) > 1 else 2)
+        if enough and not quick.bad and len(match_subjects(quick.query, subjects)) == 1:
+            return True
+    return False
 
 
 def bad_grades_notice(bad: Sequence[str], ctx: Ctx) -> str:
@@ -296,10 +301,11 @@ async def handle_multi(message: Message, ctx: Ctx, segments: Sequence[str], subj
         if slot is None:
             problems.append(f"{name} — все ОКР уже выставлены, поменяй в карточке предмета")
             continue
-        await ctx.repo.set_okr(ctx.user, subject.id, slot, values[0])
+        previous = await ctx.repo.set_okr(ctx.user, subject.id, slot, values[0])
         mark_ = "✅" if values[0] >= ctx.user.pass_mark else "❌"
         label = "ОКР" if subject.okr_count == 1 else f"ОКР №{slot}"
-        lines.append(f"{name}: {label} — {values[0]} {mark_}")
+        was = f" (было {previous})" if previous is not None else ""
+        lines.append(f"{name}: {label} — {values[0]} {mark_}{was}")
 
     notice_lines = []
     if lines:

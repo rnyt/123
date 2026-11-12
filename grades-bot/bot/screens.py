@@ -105,10 +105,29 @@ REMIND_TIMES = ["17:00", "18:00", "19:00", "20:00", "21:00", "22:00"]
 EDIT_PAGE = 24
 
 
+TELEGRAM_LIMIT = 4096
+
+
 @dataclass(slots=True)
 class Screen:
     text: str
     kb: InlineKeyboardMarkup | None = None
+
+    def __post_init__(self) -> None:
+        self.text = fit(self.text)
+
+
+def fit(text: str, limit: int = TELEGRAM_LIMIT - 96) -> str:
+    """Telegram не примет сообщение длиннее 4096 символов — аккуратно обрезаем по строкам."""
+    if len(text) <= limit:
+        return text
+    lines = text.split("\n")
+    while lines and len("\n".join(lines)) > limit:
+        lines.pop()
+    result = "\n".join(lines)
+    if result.count("<pre>") > result.count("</pre>"):
+        result += "</pre>"
+    return result + "\n…"
 
 
 # ---------------------------------------------------------------- helpers
@@ -251,7 +270,10 @@ async def main_screen(repo: Repo, user: User, notice: str | None = None, top_row
             lines.append("📊 Средний балл: <b>—</b> · оценок пока нет")
         else:
             lines.append(f"📊 Средний балл: <b>{fmt_num(ov.avg)}</b> ≈ {round_half_up(ov.avg)}")
-        lines.append(f"📚 {plural(len(views), SUBJECT_FORMS)} · {plural(ov.grades_count, GRADE_FORMS)}")
+        counts = plural(len(views), SUBJECT_FORMS)
+        if ov.grades_count:
+            counts += f" · {plural(ov.grades_count, GRADE_FORMS)}"
+        lines.append(f"📚 {counts}")
         trend = _trend_line(ov)
         if trend:
             lines.append(trend)

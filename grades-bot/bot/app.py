@@ -9,6 +9,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import BaseStorage
+from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.types import BotCommand, ErrorEvent
 from aiogram.utils.callback_answer import CallbackAnswerMiddleware
 
@@ -72,7 +73,8 @@ async def on_error(
 
 def build_dispatcher(repo: Repo, storage: BaseStorage, allowed_users: frozenset[int] = frozenset()) -> Dispatcher:
     panel = Panel(repo)
-    dp = Dispatcher(storage=storage)
+    # Апдейты одного пользователя — строго по очереди: быстрые нажатия не мешают друг другу.
+    dp = Dispatcher(storage=storage, events_isolation=SimpleEventIsolation())
     dp["repo"] = repo
     dp["panel"] = panel
     dp.update.outer_middleware(ContextMiddleware(repo, panel, allowed_users))

@@ -346,3 +346,14 @@ def test_semester_title() -> None:
     assert semester_title(date(2026, 9, 1)) == "Осень 2026"
     assert semester_title(date(2027, 1, 15)) == "Осень 2026"
     assert semester_title(date(2027, 2, 9)) == "Весна 2027"
+
+
+def test_fit_keeps_messages_within_telegram_limit() -> None:
+    from bot.screens import Screen, fit
+
+    long = "\n".join(f"строка {i}" for i in range(2000))
+    assert len(Screen(long).text) <= 4096
+    with_pre = "<pre>" + "\n".join("x" * 50 for _ in range(200)) + "</pre>"
+    cut = fit(with_pre)
+    assert cut.count("<pre>") == cut.count("</pre>")
+    assert fit("коротко") == "коротко"

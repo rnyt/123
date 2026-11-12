@@ -522,3 +522,18 @@ async def test_add_works_screen_understands_grades(env) -> None:
     assert "Физика</b>: +8, +9" in c.text
     view = next(v for v in await env.repo.views(await env.repo.get_user(c.id)) if v.name == "Программирование")
     assert view.works == []
+
+
+async def test_fast_taps_are_processed_in_order(env) -> None:
+    import asyncio
+
+    c = env.client
+    await onboard(c)
+    await c.press("Физика")
+    await c.press("➕ Оценки")
+    panel = c.panel
+    data = {text: d for text, d in panel.buttons()}
+    await asyncio.gather(*(c.press_data(data[v], panel.id) for v in ("7", "8", "9", "10")))
+    assert "Только что: 7, 8, 9, 10" in c.text
+    view = next(v for v in await env.repo.views(await env.repo.get_user(c.id)) if v.name == "Физика")
+    assert view.values == [7, 8, 9, 10]
