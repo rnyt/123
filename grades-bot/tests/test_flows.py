@@ -67,7 +67,7 @@ async def test_onboarding_college_flow(env) -> None:
     assert "🎓 Сессия: 1 экзамен, 1 диф. зачёт" in text
     assert "Нет ОКР: Высшая математика, Физика, ТОЭ" in text
     assert "Курсовой не защищён: ТОЭ" in text
-    assert any(label.startswith("🏃 Физкультура") and label.endswith("✅") for label in c.labels)
+    assert any(label.startswith("🏃 Физкультура") and label.endswith("▫️") for label in c.labels)  # оценок ещё нет
     assert [m.from_bot for m in c.visible] == [True]  # чистый чат: одно сообщение бота
 
 
@@ -525,16 +525,62 @@ async def test_subject_settings(env) -> None:
     assert "удалён" in c.text and not any("Физика" in label for label in c.labels)
 
 
-async def test_add_subjects_later(env) -> None:
+async def test_add_subjects_later_opens_setup(env) -> None:
     c = env.client
     await onboard(c)
     await c.press("➕ Предметы")
     await c.send("Химия, Охрана труда (ОТ)")
     assert "Добавлено: Химия, Охрана труда (ОТ)" in c.text
+    assert "📌 ОТ — есть ОКР" in c.labels and "✅ Готово" in c.labels  # сразу можно настроить
+    await c.press("ОТ")
+    await c.press("🎓 Экзамены")
+    await c.press("Химия")
+    await c.press("Готово")
+    assert "Готово — предметы настроены" in c.text
     assert any(label.startswith("🦺 ОТ") for label in c.labels)  # на кнопке — сокращение
+    found = await views(env, c)
+    assert found["Охрана труда"].subject.okr_count == 0 and found["Химия"].control == "exam"
     await c.press("➕ Предметы")
     await c.send("физ 8 9")
     assert "Физика</b>: +8, +9" in c.text
+
+
+async def test_subject_without_exam_and_okr(env) -> None:
+    c = env.client
+    await onboard(c, subjects="Физкультура, Физика", no_okr=("Физкультура",))
+    await c.send("физра")
+    assert "Без экзамена и ОКР — итог: отметка за семестр" in c.text
+    assert "📌 ОКР" not in c.labels and "Оценок пока нет" in c.text
+    await c.send("10910")
+    assert "Аттестован</b> · за семестр выходит <b>10</b>" in c.text
+    await c.press("+ Лабораторная")
+    await c.press("➕ 1")
+    assert "Не аттестован:</b> не зачтены ЛР 1" in c.text  # без ОКР и экзамена важны только работы
+    await c.press("⬅️ Меню")
+    assert "Нет ОКР: Физика" in c.text and "Физкультура" not in c.text.split("Нет ОКР:")[1].split("\n")[0]
+
+
+async def test_bulk_toggles_in_setup(env) -> None:
+    c = env.client
+    await c.send("/start")
+    await c.press("1 курс")
+    await c.send("Физика, Химия, История")
+    await c.press("Дальше")
+    await c.press("Ни в одном нет")
+    assert all("без ОКР" in label for label in c.labels if "—" in label)
+    await c.press("Во всех есть")
+    assert all("есть ОКР" in label for label in c.labels if "—" in label)
+    await c.press("🎓 Экзамены")
+    await c.press("Физика")
+    await c.press("Химия")
+    await c.press("Сбросить: все без экзамена")
+    assert all("без экзамена" in label for label in c.labels if "—" in label and "Сбросить" not in label)
+
+
+async def test_fresh_semester_without_okr_says_no_problems(env) -> None:
+    c = env.client
+    await onboard(c, no_okr=("Высшая", "Физика", "Программирование", "Английский"))
+    assert "Проблем нет</b> · пока без оценок" in c.text
 
 
 async def test_timezone_and_scale_settings(env) -> None:

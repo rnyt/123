@@ -152,10 +152,13 @@ async def onb_reset(cq: CallbackQuery, ctx: Ctx, callback_answer: CallbackAnswer
 # ---------------------------------------------------------------- шаг 3: ОКР, экзамены, курсовые
 
 
-async def _setup(event: Event, ctx: Ctx, tab: int, notice: str | None = None) -> None:
+async def _setup(event: Event, ctx: Ctx, tab: int, notice: str | None = None, finish: str | None = None) -> None:
+    """finish: «dates» — дальше даты сессии (знакомство, новый семестр), «main» — сразу в меню."""
+    if finish is None:
+        finish = (await ctx.data()).get("finish") or "dates"
     tab = min(max(tab, 0), 2)
-    await ctx.mode(OnbSt.setup, tab=tab)
-    await ctx.show(event, await screens.onboarding_setup(ctx.repo, ctx.user, tab, notice))
+    await ctx.mode(OnbSt.setup, tab=tab, finish=finish)
+    await ctx.show(event, await screens.onboarding_setup(ctx.repo, ctx.user, tab, notice, finish))
 
 
 @router.callback_query(Onb.filter(F.a == "setup"))
@@ -164,7 +167,7 @@ async def onb_setup(cq: CallbackQuery, ctx: Ctx, callback_answer: CallbackAnswer
         callback_answer.text = "Сначала отправь хотя бы один предмет 🙂"
         callback_answer.show_alert = True
         return
-    await _setup(cq, ctx, 0)
+    await _setup(cq, ctx, 0, finish="dates")
 
 
 @router.callback_query(Onb.filter(F.a == "tab"))
@@ -186,6 +189,22 @@ async def onb_toggle(cq: CallbackQuery, callback_data: Onb, ctx: Ctx) -> None:
         else:
             await ctx.repo.update_subject(ctx.user, subject.id, project=not subject.project)
     await _setup(cq, ctx, tab)
+
+
+@router.callback_query(Onb.filter(F.a == "bulk"))
+async def onb_bulk(cq: CallbackQuery, callback_data: Onb, ctx: Ctx) -> None:
+    """Сразу для всех предметов: ОКР везде / нигде, все без экзамена, курсовых нет."""
+    code = callback_data.v
+    for subject in await ctx.repo.list_subjects(ctx.user.id, ctx.user.semester_id):
+        if code == 1 and not subject.okr_count:
+            await ctx.repo.set_okr_count(ctx.user, subject.id, 1)
+        elif code == 2 and subject.okr_count:
+            await ctx.repo.set_okr_count(ctx.user, subject.id, 0)
+        elif code == 3:
+            await ctx.repo.update_subject(ctx.user, subject.id, control=NONE)
+        elif code == 4:
+            await ctx.repo.update_subject(ctx.user, subject.id, project=False)
+    await _setup(cq, ctx, {1: 0, 2: 0, 3: 1, 4: 2}.get(code, 0))
 
 
 @router.message(OnbSt.setup, F.text)
@@ -246,10 +265,11 @@ async def onb_skip(cq: CallbackQuery, ctx: Ctx) -> None:
 
 @router.callback_query(Onb.filter(F.a == "done"))
 async def onb_done(cq: CallbackQuery, ctx: Ctx) -> None:
-    await _finish(cq, ctx)
+    after_adding = (await ctx.data()).get("finish") == "main" and ctx.user.onboarded
+    await _finish(cq, ctx, done="✅ Готово — предметы настроены." if after_adding else None)
 
 
-async def _finish(event: Event, ctx: Ctx, extra: str | None = None) -> None:
+async def _finish(event: Event, ctx: Ctx, extra: str | None = None, done: str | None = None) -> None:
     if not await ctx.repo.list_subjects(ctx.user.id, ctx.user.semester_id):
         await ctx.mode(OnbSt.subjects)
         await ctx.show(
@@ -270,5 +290,5 @@ async def _finish(event: Event, ctx: Ctx, extra: str | None = None) -> None:
             "🧹 Твои сообщения я убираю, чтобы в чате оставалось одно аккуратное меню.",
         ]
     else:
-        lines.append("✅ Новый семестр готов. Удачи! 🍀")
+        lines.append(done or "✅ Новый семестр готов. Удачи! 🍀")
     await go_main(event, ctx, notice="\n".join(lines))

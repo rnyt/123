@@ -863,10 +863,14 @@ class SubjectView:
 
     @property
     def status_icon(self) -> str:
-        """🏁 — экзамен/зачёт сдан, ❌ — есть проблемы, ✅ — всё в порядке."""
+        """🏁 — экзамен/зачёт сдан, ❌ — есть проблемы, ▫️ — оценок ещё нет, ✅ — всё в порядке."""
         if self.has_session and self.final is not None and self.final.done:
             return "🏁"
-        return "❌" if self.problems else "✅"
+        if self.problems:
+            return "❌"
+        if self.semester_exact is None and self.final is None:
+            return "▫️"
+        return "✅"
 
 
 @dataclass

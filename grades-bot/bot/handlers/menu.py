@@ -9,7 +9,7 @@ from .. import clock, screens
 from ..callbacks import Nav, Pick
 from ..context import Ctx
 from ..logic import SNOOZE_SECONDS, fmt_time, split_names
-from ..states import Inp
+from ..states import Inp, OnbSt
 from .common import NOT_FOUND, apply_grades, apply_okr, go_main, handle_free_text, looks_like_grades, subjects_notice
 
 router = Router(name="menu")
@@ -63,8 +63,9 @@ async def add_subjects_text(message: Message, ctx: Ctx) -> None:
     if not added:
         await ctx.show(message, screens.prompt_screen(ADD_SUBJECTS_TITLE, ADD_SUBJECTS_BODY, Nav(to="main"), notice))
         return
-    notice += "\nℹ️ ОКР включена по умолчанию — если её нет, выключи в ⚙️ предмета."
-    await go_main(message, ctx, notice=notice)
+    notice += "\nОтметь, где есть ОКР, экзамены и курсовые 👇 (у предметов без них ничего не трогай)."
+    await ctx.mode(OnbSt.setup, tab=0, finish="main")
+    await ctx.show(message, await screens.onboarding_setup(ctx.repo, ctx.user, 0, notice, finish="main"))
 
 
 @router.callback_query(Nav.filter(F.to == "snooze"))

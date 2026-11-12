@@ -519,3 +519,9 @@ def test_fit_keeps_messages_within_telegram_limit() -> None:
     cut = fit(with_pre)
     assert cut.count("<pre>") == cut.count("</pre>")
     assert fit("коротко") == "коротко"
+
+
+def test_subject_without_anything_yet_is_neutral() -> None:
+    plain = make_view(okr=0)  # без экзамена, без ОКР, без оценок
+    assert plain.ok and plain.status_icon == "▫️" and plain.final is None
+    assert make_view([grade(9)], okr=0).status_icon == "✅"

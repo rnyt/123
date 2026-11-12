@@ -318,7 +318,12 @@ def _session_block(ov: Overview) -> list[str]:
 def _attestation_block(user: User, ov: Overview) -> list[str]:
     failing = [v for v in ov.views if any(p.kind in ADMISSION_KINDS for p in v.problems)]
     if not failing:
-        return ["✅ <b>Аттестован по всем предметам!</b>"] if not ov.debts else []
+        if ov.debts:
+            return []
+        empty = [esc(v.label) for v in ov.views if v.semester_exact is None and v.final is None]
+        if empty:
+            return [f"✅ <b>Проблем нет</b> · пока без оценок: {short_list(empty, 5)}"]
+        return ["✅ <b>Аттестован по всем предметам!</b>"]
     lines = [f"❌ <b>Не аттестован / нет допуска: {len(failing)} из {len(ov.views)}</b>"]
     no_okr: list[str] = []
     low_okr: list[str] = []
@@ -461,13 +466,17 @@ async def onboarding_subjects(repo: Repo, user: User, notice: str | None = None)
     return Screen(with_notice(notice, lines), markup(rows))
 
 
-async def onboarding_setup(repo: Repo, user: User, tab: int = 0, notice: str | None = None) -> Screen:
+async def onboarding_setup(
+    repo: Repo, user: User, tab: int = 0, notice: str | None = None, finish: str = "dates"
+) -> Screen:
+    """Вкладки ОКР / экзамены / курсовые. finish: «dates» — дальше даты сессии, «main» — в меню."""
     subjects = await repo.list_subjects(user.id, user.semester_id)
     step = "" if user.onboarded else "<b>Шаг 3 из 4.</b> "
     hints = (
         "Где есть <b>обязательная контрольная работа (ОКР)</b>? Без оценки за ОКР — «не аттестован». "
-        "Если ОКР несколько — это настраивается в ⚙️ предмета.",
-        "Чем заканчивается предмет? Нажимай по кругу: <b>экзамен → диф. зачёт → зачёт → без экзамена</b>.",
+        "Если в предмете ОКР нет (например, физкультура) — выключи. Несколько ОКР — в ⚙️ предмета.",
+        "Чем заканчивается предмет? Нажимай по кругу: <b>экзамен → диф. зачёт → зачёт → без экзамена</b>. "
+        "Без экзамена и зачёта итог — просто отметка за семестр.",
         "Где есть <b>курсовой проект (курсовая работа)</b>? Он оценивается отдельно и нужен для допуска (от 3).",
     )
     lines = [f"{step}Что есть в предметах? Переключай вкладки и нажимай на предметы.", "", hints[tab]]
@@ -483,7 +492,17 @@ async def onboarding_setup(repo: Repo, user: User, tab: int = 0, notice: str | N
         else:
             label = f"{'📐' if s.project else '▫️'} {name} — {'курсовой' if s.project else 'нет'}"
             rows.append([btn(label, Onb(a="tprj", v=s.id))])
-    rows.append([btn("Дальше ➡️", Onb(a="dates"))])
+    if len(subjects) > 1:
+        if tab == 0:
+            rows.append([btn("📌 Во всех есть", Onb(a="bulk", v=1)), btn("▫️ Ни в одном нет", Onb(a="bulk", v=2))])
+        elif tab == 1:
+            rows.append([btn("▫️ Сбросить: все без экзамена", Onb(a="bulk", v=3))])
+        else:
+            rows.append([btn("▫️ Сбросить: курсовых нет", Onb(a="bulk", v=4))])
+    if finish == "main":
+        rows.append([btn("✅ Готово", Onb(a="done"))])
+    else:
+        rows.append([btn("Дальше ➡️", Onb(a="dates"))])
     rows.append([btn("⬅️ Назад", Onb(a="subjects"))])
     return Screen(with_notice(notice, lines), markup(rows))
 
@@ -607,13 +626,17 @@ def status_lines(user: User, v: SubjectView) -> list[str]:
     if final is not None and final.kind == "pass":
         return ["🏁 <b>Зачтено</b> ✅"]
     if final is not None and final.kind == "grade":
-        return [f"🏁 <b>Итог за семестр: {final.value}</b>"]
+        if v.has_session:
+            return [f"🏁 <b>Итог за семестр: {final.value}</b>"]
+        return [f"✅ <b>Аттестован</b> · за семестр выходит <b>{final.value}</b>"]
     if v.has_session:
         dative = CONTROL_DATIVE[v.control]
         if v.admitted:
             return [f"🎫 <b>Допуск к {dative} есть</b> ✅"]
         reasons = v.reasons(admission_only=True) or ["нет отметок за семестр"]
         return [f"❌ <b>Нет допуска к {dative}:</b> " + "; ".join(esc(r) for r in reasons)]
+    if v.ok and v.semester_exact is None:
+        return ["📭 <b>Оценок пока нет</b> — отметка за семестр появится с первыми оценками"]
     if v.ok:
         return ["✅ <b>Аттестован</b>"]
     return ["❌ <b>Не аттестован:</b> " + "; ".join(esc(r) for r in v.reasons())]
@@ -623,6 +646,10 @@ def render_subject(user: User, v: SubjectView, notice: str | None, top_rows: Seq
     lines = [subject_title(v)]
     if v.has_session:
         lines.append(f"<i>{CONTROL_ICON[v.control]} В сессию: {CONTROL_LABEL[v.control]}</i>")
+    elif v.subject.okr_count == 0:
+        lines.append("<i>Без экзамена и ОКР — итог: отметка за семестр</i>")
+    else:
+        lines.append("<i>Без экзамена — итог: отметка за семестр</i>")
     lines.append("")
     if v.semester_exact is None:
         lines.append("📊 Оценок пока нет")
@@ -651,7 +678,10 @@ def render_subject(user: User, v: SubjectView, notice: str | None, top_rows: Seq
 
     sid = v.id
     rows: list[Row] = list(top_rows)
-    rows.append([btn("➕ Оценки", Subj(a="add", id=sid)), btn("📌 ОКР", Subj(a="okr", id=sid))])
+    if v.subject.okr_count:
+        rows.append([btn("➕ Оценки", Subj(a="add", id=sid)), btn("📌 ОКР", Subj(a="okr", id=sid))])
+    else:
+        rows.append([btn("➕ Оценки", Subj(a="add", id=sid))])
     rows.append([btn("🔬 + Лабораторная", Subj(a="nwl", id=sid)), btn("🛠 + Практическая", Subj(a="nwp", id=sid))])
     if v.works:
         done = sum(w.passed for w in v.works)
