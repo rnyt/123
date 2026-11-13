@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from aiogram.types import InlineKeyboardButton
 
 from bot.callbacks import Adm, Subj, WorkAct
 from bot.reminders import check_reminders
 from tests.conftest import onboard
-from tests.harness import Client
+from tests.harness import Client, read_xlsx
 
 
 def subject_id(client: Client) -> int:
@@ -615,18 +616,27 @@ async def test_clean_chat_off_keeps_history(env) -> None:
     assert all(not m.kb for m in bots[:-1])
 
 
-async def test_export_csv(env) -> None:
+async def test_export_xlsx(env) -> None:
     c = env.client
     await onboard(c, exams={"Физика": 1})
     await c.send("физ 8 9")
     await c.send("физ окр 7")
+    await c.send("прог 6 7")
     await c.send("/settings")
-    await c.press("Экспорт")
+    await c.press("Экспорт в Excel")
     (doc,) = [m for m in c.visible if m.document is not None]
-    content = doc.document.decode("utf-8-sig")
-    assert doc.filename == "Оценки — 2 курс _ 1 семестр.csv"
-    assert "Физика;8;7,75;3;7;;;экзамен;;;" in content
-    assert "Физика;ОКР;7;;" in content
+    assert doc.filename == "Оценки — 2 курс _ 1 семестр.xlsx"
+    book = read_xlsx(doc.document)
+    assert list(book) == ["Итоги", "Все оценки"]
+    summary, grades = book["Итоги"], book["Все оценки"]
+    assert summary[0] == ["Оценки — 2 курс · 1 семестр"]
+    assert summary[3][:4] == ["Предмет", "За семестр", "Средний", "Оценок"]
+    rows = {r[0]: r for r in summary if r}
+    assert rows["Физика"][:8] == ["Физика", 8, 7.75, 3, 7, None, None, "экзамен"]
+    assert rows["Средний балл"][1] == 7.5  # (8 + 7) / 2: отметки за семестр по физике и программированию
+    assert rows["Средний балл"][10].startswith("= 15 / 2")
+    assert rows["Без округления"][1] == pytest.approx(7.125)  # (7,75 + 6,5) / 2
+    assert ["Физика", "ОКР", 7] in [r[:3] for r in grades]
     assert c.panel.id > doc.id
 
 
@@ -649,7 +659,8 @@ async def test_stats_screen(env) -> None:
     await c.press("8", exact=True)
     await c.send("/stats")
     text = c.text
-    assert "Средний балл: <b>7,67</b>" in text  # (9,33 + 6) / 2
+    assert "Средний балл: <b>7,50</b> = 15 / 2" in text  # итог по физике (9 + 8) / 2 = 8,5 → 9 и прог 6
+    assert "Без округления: 7,67" in text  # (9,33 + 6) / 2
     assert "Средний балл сессии (экзамены и диф. зачёты): <b>8,00</b>" in text
     assert "🥇 ⚛️ Физика — 9,33" in text and "<pre>" in text
 

@@ -10,7 +10,7 @@ from .. import clock, screens
 from ..callbacks import CalcSet, Nav, Rem, ScaleSet, SemSet, TzSet
 from ..context import Ctx
 from ..dates import fmt_range, parse_range
-from ..export import build_csv
+from ..export import build_xlsx
 from ..logic import SCALES, fmt_time, parse_hhmm, parse_tz, remind_every_label
 from ..models import CALC_MEAN, CALC_SSO, FINAL_AVG, FINAL_EXAM
 from ..reminders import send_reminder
@@ -253,11 +253,12 @@ async def clean_toggle(cq: CallbackQuery, ctx: Ctx) -> None:
 
 @router.callback_query(Nav.filter(F.to == "export"))
 async def export(cq: CallbackQuery, ctx: Ctx, callback_answer: CallbackAnswer) -> None:
-    data, filename = await build_csv(ctx.repo, ctx.user)
+    data, filename = await build_xlsx(ctx.repo, ctx.user)
     await ctx.bot.send_document(
         ctx.user.id,
         BufferedInputFile(data, filename=filename),
-        caption="📤 Оценки, ОКР, работы, экзамены и итоги семестра. Открывается в Excel и Google Таблицах.",
+        caption="📤 Оценки, ОКР, работы, экзамены и итоги семестра — таблица Excel. "
+        "Открывается в Excel, Google Таблицах и прямо на телефоне.",
     )
     callback_answer.text = "Файл отправлен 👇"
     await ctx.mode()

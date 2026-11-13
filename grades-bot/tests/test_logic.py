@@ -9,6 +9,7 @@ from bot.dates import next_term, parse_range, phase, term_for
 from bot.logic import (
     Overview,
     SubjectView,
+    fmt_num,
     match_subjects,
     need_count,
     next_goal,
@@ -377,7 +378,9 @@ def test_overview_average_and_session() -> None:
     c = SubjectView(subj(3, "C", okr=0, control=CREDIT, credit=True), [], [], 3, 10)
     empty = SubjectView(subj(4, "D", okr=0), [], [], 3, 10)
     ov = Overview([a, b, c, empty])
-    assert ov.avg == 8  # (10 + 6) / 2 — у каждого предмета равный вес
+    assert ov.marks == [10, 7]  # итоговые отметки: (10+9)/2=9,5→10; (6+7)/2=6,5→7
+    assert ov.avg == 8.5  # (10 + 7) / 2 — у каждого предмета равный вес
+    assert ov.avg_exact == 8  # без округления: (10 + 6) / 2
     assert ov.session_avg == 8  # (9 + 7) / 2
     assert ov.session_complete
     assert [v.final.value for v in (a, b)] == [10, 7]  # (10+9)/2=9,5→10; (6+7)/2=6,5→7
@@ -525,3 +528,33 @@ def test_subject_without_anything_yet_is_neutral() -> None:
     plain = make_view(okr=0)  # без экзамена, без ОКР, без оценок
     assert plain.ok and plain.status_icon == "▫️" and plain.final is None
     assert make_view([grade(9)], okr=0).status_icon == "✅"
+
+
+def test_average_like_in_college_records() -> None:
+    """Средний балл — среднее отметок по предметам, как в ведомости: 58 / 11 = 5,27.
+
+    Реальный случай: без округления (7,75; 6,75; 4,5…) выходило 5,11, и это сбивало с толку.
+    """
+    data = {
+        "ТЭМР": [8], "Стандарты": [8, 9, 8, 8, 7, 9, 9, 4], "Охрана труда": [7, 7, 6, 7],
+        "Основы ИГ": [6, 7, 5, 7, 9], "Основы ТМ": [7, 3, 8], "ОКЖД": [4, 5], "ФКИЗ": [4],
+        "Материал и ТМ": [3, 4], "Эл.Приборы": [3, 3, 2, 3], "ТОЭ": [3], "Лин.сооружения": [3, 3, 3, 3, 3, 4],
+    }  # fmt: skip
+    exams = {"Охрана труда", "Эл.Приборы"}
+    views = [
+        SubjectView(subj(i, name, okr=0 if name == "ФКИЗ" else 1, control=EXAM if name in exams else NONE),
+                    [grade(v, gid=j) for j, v in enumerate(values)], [], 3, 10)
+        for i, (name, values) in enumerate(data.items(), 1)
+    ]  # fmt: skip
+    ov = Overview(views)
+    assert ov.marks == [8, 8, 7, 7, 6, 5, 4, 4, 3, 3, 3]
+    assert fmt_num(ov.avg) == "5,27"
+    assert fmt_num(ov.avg_exact) == "5,11"
+
+
+def test_average_uses_final_mark_after_exam() -> None:
+    """После экзамена в средний идёт итог предмета, а не отметка за семестр."""
+    exam = SubjectView(subj(1, "A", okr=0, control=EXAM, exam_grade=10), [grade(7)], [], 3, 10)
+    plain = SubjectView(subj(2, "B", okr=0), [grade(6)], [], 3, 10)
+    assert exam.mark == 9  # (7 + 10) / 2 = 8,5 → 9
+    assert Overview([exam, plain]).avg == 7.5

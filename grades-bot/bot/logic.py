@@ -689,6 +689,14 @@ class SubjectView:
         return round_half_up(self.semester_exact) if self.semester_exact is not None else None
 
     @property
+    def mark(self) -> int | None:
+        """Отметка предмета для среднего балла: итоговая, если уже есть, иначе — за семестр."""
+        final = self.final
+        if final is not None and final.value is not None:
+            return final.value
+        return self.semester_grade
+
+    @property
     def formula(self) -> str | None:
         """«(ОКР 8 + курсовой 9 + текущие 7,20) / 3 = 8,07» — когда считается не простым средним."""
         if self.simple or len(self.parts) < 2:
@@ -878,8 +886,21 @@ class Overview:
     views: list[SubjectView]
 
     @cached_property
+    def marks(self) -> list[int]:
+        """Отметки по предметам, из которых складывается средний балл."""
+        return [mark for v in self.views if (mark := v.mark) is not None]
+
+    @cached_property
     def avg(self) -> float | None:
-        """Средний балл = среднее отметок за семестр по предметам (у каждого предмета равный вес)."""
+        """Средний балл, как в ведомости: среднее отметок по предметам (у каждого предмета равный вес).
+
+        Берётся итоговая отметка предмета, а пока её нет — отметка за семестр (целая, после округления).
+        """
+        return mean(self.marks)
+
+    @cached_property
+    def avg_exact(self) -> float | None:
+        """То же, но без округления: среднее точных значений за семестр (7,75 вместо 8)."""
         return mean(v.semester_exact for v in self.views if v.semester_exact is not None)
 
     @cached_property
@@ -894,7 +915,7 @@ class Overview:
                         v.calc_mode, v.final_mode)
             for v in self.views
         ]  # fmt: skip
-        return mean(v.semester_exact for v in past if v.semester_exact is not None)
+        return Overview(past).avg
 
     def added_since(self, ts: int) -> int:
         return sum(1 for v in self.views for g in v.grades if g.created_at >= ts)

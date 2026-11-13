@@ -56,7 +56,6 @@ from .logic import (
     plural,
     progress_bar,
     remind_every_label,
-    round_half_up,
     short_list,
     subject_icon,
     truncate,
@@ -388,7 +387,7 @@ async def main_screen(repo: Repo, user: User, notice: str | None = None, top_row
         if ov.avg is None:
             lines.append("📊 Средний балл: <b>—</b> · оценок пока нет")
         else:
-            lines.append(f"📊 Средний балл: <b>{fmt_num(ov.avg)}</b> ≈ {round_half_up(ov.avg)}")
+            lines.append(f"📊 Средний балл: <b>{fmt_num(ov.avg)}</b>")
         counts = plural(len(views), SUBJECT_FORMS)
         if ov.grades_count:
             counts += f" · {plural(ov.grades_count, GRADE_FORMS)}"
@@ -1166,8 +1165,10 @@ async def stats_screen(repo: Repo, user: User) -> Screen:
     if not ov.grades_count:
         lines.append("Пока нет оценок — статистика появится, как только добавишь первые.")
     else:
-        lines.append(f"Средний балл: <b>{fmt_num(ov.avg)}</b> ≈ {round_half_up(ov.avg or 0)}")
-        lines.append(f"По всем оценкам подряд: {fmt_num(ov.avg_all)}")
+        marks = ov.marks
+        lines.append(f"Средний балл: <b>{fmt_num(ov.avg)}</b> = {sum(marks)} / {len(marks)}")
+        lines.append("<i>Как в ведомости: среднее отметок по предметам — итоговых, а до сессии — за семестр.</i>")
+        lines.append(f"Без округления: {fmt_num(ov.avg_exact)} · по всем оценкам подряд: {fmt_num(ov.avg_all)}")
         lines.append(f"Оценок: {ov.grades_count} · за неделю: +{week}")
     if ov.session_avg is not None:
         lines.append(f"Средний балл сессии (экзамены и диф. зачёты): <b>{fmt_num(ov.session_avg)}</b>")
@@ -1237,6 +1238,7 @@ def help_screen(user: User, is_owner: bool = False) -> Screen:
         "• итог с экзаменом — (семестровая + экзамен) / 2"
         if user.final_mode == FINAL_AVG
         else "• итог — отметка за экзамен (п. 20);",
+        "• средний балл — среднее отметок по предметам (итоговых, до сессии — за семестр), как в ведомости;",
         f"• допуск к экзамену: за семестр от {user.pass_mark}, курсовой от {user.pass_mark}, все ЛР и ПР зачтены;",
         "• не аттестован — если не сданы ОКР, работы или курсовой.",
         "",
@@ -1277,7 +1279,7 @@ async def settings_screen(repo: Repo, user: User, notice: str | None = None, is_
             btn("🔢 Шкала и порог", Nav(to="scale")),
             btn(f"🧹 Чистый чат: {'вкл ✅' if user.clean_chat else 'выкл'}", Nav(to="clean")),
         ],
-        [btn("📤 Экспорт", Nav(to="export")), btn("🗑 Удалить всё", Nav(to="wipe"))],
+        [btn("📤 Экспорт в Excel", Nav(to="export")), btn("🗑 Удалить всё", Nav(to="wipe"))],
     ]
     if is_owner:
         rows.append([btn("🛡 Админ-панель", Adm(a="main"))])

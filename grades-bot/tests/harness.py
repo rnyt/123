@@ -318,3 +318,37 @@ class Client:
             for row in self.panel.kb.inline_keyboard:
                 rows.append(" | ".join(f"[{b.text}]" for b in row))
         return self.panel.text + "\n" + "\n".join(rows)
+
+
+def read_xlsx(data: bytes) -> dict[str, list[list[Any]]]:
+    """Прочитать .xlsx в {лист: строки} — числа как int/float, пустые ячейки как None."""
+    import io
+    import zipfile
+    from xml.etree import ElementTree
+
+    ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    rid = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+    archive = zipfile.ZipFile(io.BytesIO(data))
+    assert archive.testzip() is None
+    sst = ElementTree.fromstring(archive.read("xl/sharedStrings.xml"))
+    strings = ["".join(t.text or "" for t in si.iter(f"{{{ns['m']}}}t")) for si in sst.findall("m:si", ns)]
+    rels = {r.get("Id"): r.get("Target") for r in ElementTree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))}
+    book: dict[str, list[list[Any]]] = {}
+    for sheet in ElementTree.fromstring(archive.read("xl/workbook.xml")).find("m:sheets", ns):
+        root = ElementTree.fromstring(archive.read(f"xl/{rels[sheet.get(rid)]}"))
+        rows: list[list[Any]] = []
+        for row in root.find("m:sheetData", ns):
+            while len(rows) < int(row.get("r")):
+                rows.append([])
+            cells = rows[-1]
+            for c in row:
+                letters = re.match(r"[A-Z]+", c.get("r")).group()
+                col = 0
+                for ch in letters:
+                    col = col * 26 + ord(ch) - 64
+                raw = c.findtext("m:v", namespaces=ns)
+                value: Any = strings[int(raw)] if c.get("t") == "s" else float(raw) if "." in raw else int(raw)
+                cells.extend([None] * (col - len(cells)))
+                cells[col - 1] = value
+        book[sheet.get("name")] = rows
+    return book
