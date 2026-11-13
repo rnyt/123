@@ -352,6 +352,7 @@ async def test_archive_and_next_semester(env) -> None:
     await c.press("⬅️ Меню")
     await c.press("🗂 Архив")
     assert "Архив пуст" in c.text
+    assert "за всё обучение" not in c.text  # текущий семестр не закончен — не считаем
     await c.press("Отправить текущий семестр в архив")
     assert "Отправить «1 курс · 1 семестр» в архив?" in c.text
     await c.press("Да, в архив")
@@ -359,8 +360,10 @@ async def test_archive_and_next_semester(env) -> None:
     await c.press("Перенести список")
     assert "Перенёс 4 предмета" in c.text and "оценок пока нет" in c.text
     await c.press("🗂 Архив")
-    await c.press("📁 1 курс · 1 семестр")
+    assert "🎓 Средний за всё обучение: <b>8,00</b> (семестров в архиве: 1)" in c.text
+    await c.press("📁 1 курс · 1 семестр · 8,00")
     assert "архив" in c.text and "⚛️ Физика —" in c.text
+    assert "📊 Средний балл: <b>8,00</b> = 8 / 1" in c.text
 
 
 async def test_archive_with_fresh_subjects_and_course_change(env) -> None:
@@ -625,7 +628,7 @@ async def test_export_xlsx(env) -> None:
     await c.send("/settings")
     await c.press("Экспорт в Excel")
     (doc,) = [m for m in c.visible if m.document is not None]
-    assert doc.filename == "Оценки — 2 курс _ 1 семестр.xlsx"
+    assert doc.filename == "Оценки 2 курс 1 семестр.xlsx"
     book = read_xlsx(doc.document)
     assert list(book) == ["Итоги", "Все оценки"]
     summary, grades = book["Итоги"], book["Все оценки"]
@@ -702,7 +705,7 @@ async def test_admin_adds_by_username_and_views_silently(env) -> None:
     await owner.press("Пользователи")
     assert "⏳ Приглашены, но ещё не заходили: @kolya_2000" in owner.text
     await owner.press("👤 Петя")
-    assert "⚛️ Физика — 8,50 ❌ (нет оценки за ОКР)" in owner.text
+    assert "⚛️ Физика — 9 (8,50) ❌ (нет оценки за ОКР)" in owner.text
     assert len(env.tg.chat(petya.id)) == before  # просмотр тихий — Пете ничего не пришло
     assert (await views(env, owner))["Физика"].values == []  # у каждого свои данные
     await owner.press("Закрыть доступ")

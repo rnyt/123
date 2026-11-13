@@ -272,6 +272,9 @@ def _key_matches(key: str, normalized: str, words: list[str]) -> bool:
     return any(word.startswith(key) for word in words)
 
 
+DEFAULT_ICON = "📘"  # предмет не узнан — общий значок
+
+
 def subject_icon(name: str) -> str:
     """Иконка предмета: своя (эмодзи в начале названия) или подобранная по смыслу."""
     icon, rest = split_icon(name)
@@ -282,7 +285,7 @@ def subject_icon(name: str) -> str:
     for keys, emoji in _ICON_RULES:
         if any(_key_matches(key, normalized, words) for key in keys):
             return emoji
-    return "📘"
+    return DEFAULT_ICON
 
 
 # ---------------------------------------------------------------- поиск предмета

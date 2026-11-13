@@ -113,5 +113,6 @@ async def build_xlsx(repo: Repo, user: User) -> tuple[bytes, str]:
             grades.add(v.title, w.full, None, status, when)
 
     data = build([summary, grades], title=f"Оценки — {title}", created=datetime.fromtimestamp(now, timezone.utc))
-    safe_title = "".join(ch if ch.isalnum() or ch in " -_()" else "_" for ch in title).strip()
-    return data, f"Оценки — {safe_title}.xlsx"
+    # Только буквы, цифры и пробелы: Telegram и телефоны теряют «—», а «·» превращалась в «_».
+    safe_title = " ".join("".join(ch if ch.isalnum() else " " for ch in title).split())
+    return data, f"Оценки {safe_title}.xlsx"

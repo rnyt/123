@@ -41,6 +41,7 @@ from .dates import fmt_day, fmt_range, in_range, phase
 from .logic import (
     ADMISSION_KINDS,
     DAY_FORMS,
+    DEFAULT_ICON,
     GRADE_FORMS,
     SUBJECT_FORMS,
     WORK_FORMS,
@@ -254,18 +255,78 @@ def today_for(user: User) -> date:
     return local_dt(clock.now(), user.tz).date()
 
 
-def value_label(v: SubjectView) -> str:
-    """Что писать на кнопке предмета: итог, «зачтено» или текущая отметка за семестр."""
+def value_label(v: SubjectView) -> str | None:
+    """Что писать рядом с предметом: отметка (итоговая, а до неё — за семестр) или «зачтено»."""
     final = v.final
-    if final is not None and final.kind == "grade" and v.has_session:
-        return f"итог {final.value}"
     if final is not None and final.kind == "pass":
         return "зачтено"
-    return fmt_num(v.semester_exact)
+    if final is not None and final.kind == "debt" and final.value is None:
+        return "не зачтено"
+    return str(v.mark) if v.mark is not None else None
 
 
 def subject_button(v: SubjectView, data: CallbackData) -> InlineKeyboardButton:
-    return btn(f"{v.icon} {truncate(v.label, 22)} · {value_label(v)} {v.status_icon}", data)
+    """«Стандарты · 8 ❌» — название, отметка и статус; точный средний (7,75) — внутри предмета.
+
+    Значок — только узнанный (🦺, ⚛️…): общий 📘 ничего не говорит и съедает место на кнопке.
+    """
+    name = truncate(v.label, 22)
+    if v.icon != DEFAULT_ICON:
+        name = f"{v.icon} {name}"
+    value = value_label(v)
+    return btn(f"{name} · {value} {v.status_icon}" if value else f"{name} {v.status_icon}", data)
+
+
+def mark_text(v: SubjectView) -> str | None:
+    """«9 (8,50)» — отметка и точный средний за семестр, пока итога ещё нет."""
+    value = value_label(v)
+    final = v.final
+    exact = v.semester_exact
+    no_final = final is None or final.value is None
+    if value is not None and value.isdigit() and no_final and exact is not None and exact != int(value):
+        return f"{value} ({fmt_num(exact)})"
+    return value
+
+
+def text_width(text: str) -> float:
+    """Примерная ширина подписи в «буквах»: эмодзи шире, пробелы и точки уже, заглавные чуть шире."""
+    width = 0.0
+    for ch in text:
+        code = ord(ch)
+        if code in (0xFE0F, 0x200D):
+            continue
+        if code >= 0x1F000 or 0x2190 <= code <= 0x2BFF:
+            width += 2
+        elif ch in " .,·:;'’-–—()/":
+            width += 0.5
+        elif ch.isupper():
+            width += 1.2
+        else:
+            width += 1
+    return width
+
+
+HALF_ROW = 15.0  # столько «букв» влезает в кнопку на пол-экрана телефона, дальше Telegram режет «…»
+
+
+def pack_rows(buttons: Sequence[InlineKeyboardButton], half: float = HALF_ROW) -> list[Row]:
+    """По две кнопки в ряд, если обе подписи влезают целиком, иначе кнопка на весь ряд. Порядок тот же."""
+    rows: list[Row] = []
+    pending: InlineKeyboardButton | None = None
+    for button in buttons:
+        if text_width(button.text) > half:
+            if pending is not None:
+                rows.append([pending])
+                pending = None
+            rows.append([button])
+        elif pending is not None:
+            rows.append([pending, button])
+            pending = None
+        else:
+            pending = button
+    if pending is not None:
+        rows.append([pending])
+    return rows
 
 
 # ---------------------------------------------------------------- главное меню
@@ -410,7 +471,7 @@ async def main_screen(repo: Repo, user: User, notice: str | None = None, top_row
     rows: list[Row] = list(top_rows)
     if ov.session_complete and not any(Arch(a="ask").pack() == b.callback_data for r in top_rows for b in r):
         rows.append([btn("🗂 Архивировать семестр", Arch(a="ask"))])
-    rows += adaptive_rows([subject_button(v, Subj(a="v", id=v.id)) for v in views], wide=24, narrow=0)
+    rows += pack_rows([subject_button(v, Subj(a="v", id=v.id)) for v in views])
     rows.append([btn("➕ Предметы", Nav(to="add_subj")), btn("📊 Статистика", Nav(to="stats"))])
     rows.append([btn("🗂 Архив", Arch(a="list")), btn("⚙️ Настройки", Nav(to="settings"))])
     rows.append([btn("❓ Помощь", Nav(to="help"))])
@@ -1434,8 +1495,9 @@ def final_line(v: SubjectView) -> str:
 
 
 def live_line(v: SubjectView) -> str:
-    """Предмет текущего семестра одной строкой: «⚛️ Физика — 8,50 ❌ (нет оценки за ОКР)»."""
-    line = f"{v.icon} {esc(v.label)} — {value_label(v)} {v.status_icon}"
+    """Предмет текущего семестра одной строкой: «⚛️ Физика — 9 (8,50) ❌ (нет оценки за ОКР)»."""
+    value = mark_text(v)
+    line = f"{v.icon} {esc(v.label)}" + (f" — {value}" if value else "") + f" {v.status_icon}"
     if v.problems:
         line += f" ({esc('; '.join(v.reasons()))})"
     return line
@@ -1443,8 +1505,8 @@ def live_line(v: SubjectView) -> str:
 
 def summary_lines(ov: Overview) -> list[str]:
     lines = []
-    if ov.finals_avg is not None:
-        lines.append(f"📊 Средний итоговых отметок: <b>{fmt_num(ov.finals_avg)}</b>")
+    if ov.avg is not None:
+        lines.append(f"📊 Средний балл: <b>{fmt_num(ov.avg)}</b> = {sum(ov.marks)} / {len(ov.marks)}")
     if ov.session_avg is not None:
         lines.append(f"🎓 Средний сессии: <b>{fmt_num(ov.session_avg)}</b>")
     if ov.debts:
@@ -1453,16 +1515,20 @@ def summary_lines(ov: Overview) -> list[str]:
 
 
 async def diploma_avg(repo: Repo, user: User) -> tuple[float | None, int]:
-    """Средний итоговых отметок за все семестры — примерно как в приложении к диплому."""
-    values: list[int] = []
+    """Средний за всё обучение — по отметкам предметов всех семестров в архиве (как в приложении к диплому).
+
+    Текущий семестр не считается: он ещё не закончен, итоговых отметок в нём почти нет.
+    """
+    marks: list[int] = []
     semesters = 0
     for semester in await repo.list_semesters(user.id):
-        ov = Overview(await repo.views(user, semester.id))
-        finals = [v.final.value for v in ov.views if v.final is not None and v.final.kind == "grade" and v.final.value]
-        if finals:
+        if not semester.archived_at:
+            continue
+        semester_marks = Overview(await repo.views(user, semester.id)).marks
+        if semester_marks:
             semesters += 1
-            values.extend(finals)
-    return mean(values), semesters
+            marks.extend(semester_marks)
+    return mean(marks), semesters
 
 
 async def archive_screen(repo: Repo, user: User, notice: str | None = None) -> Screen:
@@ -1477,7 +1543,7 @@ async def archive_screen(repo: Repo, user: User, notice: str | None = None) -> S
         )
     total, count = await diploma_avg(repo, user)
     if total is not None:
-        lines.append(f"🎓 Средний за всё обучение: <b>{fmt_num(total)}</b> (итоговые отметки, семестров: {count})")
+        lines.append(f"🎓 Средний за всё обучение: <b>{fmt_num(total)}</b> (семестров в архиве: {count})")
     lines.append("")
     if archived:
         lines.append("Нажми на семестр, чтобы посмотреть итоги:")
@@ -1485,7 +1551,7 @@ async def archive_screen(repo: Repo, user: User, notice: str | None = None) -> S
         lines.append("Архив пуст. После сессии я предложу отправить семестр сюда — со всеми оценками и итогами.")
     rows: list[Row] = []
     for semester in archived:
-        avg = Overview(await repo.views(user, semester.id)).finals_avg
+        avg = Overview(await repo.views(user, semester.id)).avg
         rows.append([btn(f"📁 {semester.label} · {fmt_num(avg)}", Arch(a="view", id=semester.id))])
     if ov.views:
         rows.append([btn("🗂 Отправить текущий семестр в архив", Arch(a="ask"))])
@@ -1660,8 +1726,8 @@ async def admin_user_screen(repo: Repo, target: User, has_access: bool, notice: 
             lines.append(f"🔬 Зачтено работ: {ov.works_done} из {ov.works_total}")
         lines += ["", *[live_line(v) for v in ov.views]]
     total, count = await diploma_avg(repo, target)
-    if total is not None and count > 1:
-        lines += ["", f"🎓 Средний за всё обучение: {fmt_num(total)} (семестров: {count})"]
+    if total is not None:
+        lines += ["", f"🎓 Средний за всё обучение: {fmt_num(total)} (семестров в архиве: {count})"]
     rows: list[Row] = []
     if has_access:
         rows.append([btn("🔒 Закрыть доступ", Adm(a="revoke", id=target.id))])
