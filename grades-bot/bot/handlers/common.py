@@ -17,6 +17,7 @@ from ..logic import (
     display_name,
     fmt_num,
     match_subjects,
+    parse_marks,
     parse_quick,
     split_segments,
     subject_icon,
@@ -81,9 +82,25 @@ def subjects_notice(added: Sequence[Subject], skipped: Sequence[str]) -> str:
     if added:
         names = [esc(display_name(s.name)) + (f" ({esc(s.short)})" if s.short else "") for s in added]
         parts.append("✅ Добавлено: " + ", ".join(names))
+        carried = carried_line(added)
+        if carried:
+            parts.append(carried)
     if skipped:
         parts.append(f"↪️ Пропущено (уже есть или больше {MAX_SUBJECTS}): " + ", ".join(esc(n) for n in skipped))
     return "\n".join(parts) or "⚠️ Не нашёл названий предметов — отправь их через запятую."
+
+
+def carried_line(subjects: Sequence[Subject], limit: int = 8) -> str | None:
+    """«📚 Отметки за прошлый семестр сохранены: ТОЭ (7), Физика (8)» — для предметов, которые продолжаются."""
+    items = [
+        f"{esc(s.short or display_name(s.name))} ({', '.join(map(str, parse_marks(s.prev_marks)))})"
+        for s in subjects
+        if parse_marks(s.prev_marks)
+    ]
+    if not items:
+        return None
+    shown = ", ".join(items[:limit]) + (f" и ещё {len(items) - limit}" if len(items) > limit else "")
+    return f"📚 Отметки за прошлый семестр сохранены: {shown}. Они войдут в итог по предмету."
 
 
 def quick_names(subjects: Sequence[Subject]) -> list[str]:

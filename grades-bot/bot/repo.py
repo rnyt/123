@@ -36,6 +36,7 @@ _SEMESTER_FIELDS = {
 }  # fmt: skip
 _SUBJECT_FIELDS = {
     "name", "short", "okr_count", "control", "exam_grade", "credit", "project", "project_grade", "general",
+    "prev_marks",
 }  # fmt: skip
 HAS_LETTERS = re.compile(r"[^\W\d_]")
 
@@ -205,24 +206,40 @@ class Repo:
         )
         return Semester.from_row(row) if row else None
 
-    async def copy_subjects(self, uid: int, from_sem: int, to_sem: int) -> int:
-        rows = await self._all(
-            "SELECT * FROM subjects WHERE user_id = ? AND semester_id = ? ORDER BY position, id", (uid, from_sem)
-        )
-        if not rows or not await self.get_semester(uid, to_sem):
+    async def copy_subjects(self, user: User, from_sem: int, to_sem: int) -> int:
+        """Перенести список предметов в новый семестр. Оценки начинаются заново, а отметка за прошлый
+        семестр сохраняется у предмета (prev_marks) и войдёт в итог, если предмет идёт несколько семестров."""
+        views = await self.views(user, from_sem)
+        if not views or not await self.get_semester(user.id, to_sem):
             return 0
         ts = clock.now()
         async with self.tx() as db:
-            for pos, row in enumerate(rows):
+            for pos, v in enumerate(views):
+                s = v.subject
                 await db.execute(
                     "INSERT INTO subjects (user_id, semester_id, name, short, okr_count, position, created_at,"
-                    " control, project, general) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " control, project, general, prev_marks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        uid, to_sem, row["name"], row["short"], row["okr_count"], pos, ts,
-                        row["control"], row["project"], row["general"],
+                        user.id, to_sem, s.name, s.short, s.okr_count, pos, ts,
+                        s.control, int(s.project), int(s.general), v.carry,
                     ),
                 )  # fmt: skip
-        return len(rows)
+        return len(views)
+
+    async def carried_marks(self, user: User) -> dict[str, str]:
+        """Отметки предметов прошлого (архивного) семестра по названию и сокращению — для продолжения предмета."""
+        previous = await self.last_archived(user.id)
+        if previous is None or previous.id == user.semester_id:
+            return {}
+        result: dict[str, str] = {}
+        for v in await self.views(user, previous.id):
+            carry = v.carry
+            if not carry:
+                continue
+            result.setdefault(norm(display_name(v.subject.name)), carry)
+            if v.subject.short:
+                result.setdefault(norm(v.subject.short), carry)
+        return result
 
     # ------------------------------------------------------------ subjects
 
@@ -268,13 +285,15 @@ class Repo:
             return [], skipped
         ts = clock.now()
         start = max((s.position for s in existing), default=-1) + 1
+        carried = await self.carried_marks(user)  # предмет был и в прошлом семестре — он продолжается
         ids = []
         async with self.tx() as db:
             for offset, (name, short) in enumerate(fresh):
+                prev = carried.get(norm(display_name(name))) or (carried.get(norm(short)) if short else None)
                 cur = await db.execute(
-                    "INSERT INTO subjects (user_id, semester_id, name, short, okr_count, position, created_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (user.id, user.semester_id, name, short, okr_count, start + offset, ts),
+                    "INSERT INTO subjects (user_id, semester_id, name, short, okr_count, position, created_at,"
+                    " prev_marks) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (user.id, user.semester_id, name, short, okr_count, start + offset, ts, prev),
                 )
                 ids.append(cur.lastrowid)
         added = [s for s in await self.list_subjects(user.id, user.semester_id) if s.id in set(ids)]

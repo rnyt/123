@@ -120,6 +120,7 @@ class Subject(Row):
     project: bool
     project_grade: int | None
     general: bool
+    prev_marks: str | None = None  # отметки за прошлые семестры: «7» или «7 8»
 
     BOOL = frozenset({"credit", "project", "general"})
     NULLABLE_BOOL = frozenset({"credit"})

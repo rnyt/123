@@ -418,6 +418,11 @@ def split_digits(token: str, high: int) -> list[int] | None:
     return values
 
 
+def parse_marks(text: str | None) -> list[int]:
+    """«7 8» → [7, 8]: отметки за прошлые семестры, как они хранятся у предмета."""
+    return [int(part) for part in (text or "").replace(",", " ").split() if part.isdigit()]
+
+
 def parse_grades(text: str, low: int, high: int) -> tuple[list[int], list[str]]:
     """«8, 9/10 7» -> ([8, 9, 10, 7], []); «10910» -> [10, 9, 10]. Неверные кусочки — отдельно."""
     values: list[int] = []
@@ -699,6 +704,36 @@ class SubjectView:
             return final.value
         return self.semester_grade
 
+    # ------------------------------------------------------------ несколько семестров (п. 24)
+
+    @cached_property
+    def previous(self) -> list[int]:
+        """Отметки за прошлые семестры, если предмет идёт не первый семестр."""
+        return parse_marks(self.subject.prev_marks)
+
+    @cached_property
+    def course_marks(self) -> list[int]:
+        """Отметки за все семестры по предмету: прошлые и этот. Пусто, если предмет односеместровый."""
+        if not self.previous or self.semester_grade is None:
+            return []
+        return [*self.previous, self.semester_grade]
+
+    @cached_property
+    def course_exact(self) -> float | None:
+        """Среднее отметок за все семестры (7 и 8 → 7,5)."""
+        return mean(self.course_marks)
+
+    @property
+    def base_grade(self) -> int | None:
+        """С чем складывается экзамен: отметка за семестр, а если предмет шёл несколько семестров — за все."""
+        return round_half_up(self.course_exact) if self.course_exact is not None else self.semester_grade
+
+    @property
+    def carry(self) -> str | None:
+        """Что перенести в следующий семестр, если предмет продолжается: прошлые отметки и отметку за этот."""
+        marks = [*self.previous, *([self.mark] if self.mark is not None else [])]
+        return " ".join(map(str, marks)) or None
+
     @property
     def formula(self) -> str | None:
         """«(ОКР 8 + курсовой 9 + текущие 7,20) / 3 = 8,07» — когда считается не простым средним."""
@@ -800,11 +835,11 @@ class SubjectView:
                 return None
             if exam < self.pass_mark:
                 return Final("debt", exam, f"{self.control_label} на {exam}")
-            semester = self.semester_grade
-            if self.final_mode == FINAL_EXAM or semester is None:
+            base = self.base_grade  # за семестр, а у предмета на несколько семестров — за все семестры
+            if self.final_mode == FINAL_EXAM or base is None:
                 return Final("grade", exam, f"{self.control_label} {exam}")
-            exact = (semester + exam) / 2
-            return Final("grade", round_half_up(exact), f"({semester} + {exam}) / 2 = {fmt_num(exact, 1)}")
+            exact = (base + exam) / 2
+            return Final("grade", round_half_up(exact), f"({base} + {exam}) / 2 = {fmt_num(exact, 1)}")
         if control == CREDIT:
             if self.subject.credit is None:
                 return None
@@ -835,11 +870,12 @@ class SubjectView:
 
     def exam_table(self) -> list[tuple[int, int, int]]:
         """Какой выйдет итог при каждой отметке за экзамен: [(от, до, итог), ...]."""
-        if self.final_mode != FINAL_AVG or self.semester_grade is None:
+        base = self.base_grade
+        if self.final_mode != FINAL_AVG or base is None:
             return []
         rows: list[list[int]] = []
         for exam in range(self.pass_mark, self.scale + 1):
-            result = round_half_up((self.semester_grade + exam) / 2)
+            result = round_half_up((base + exam) / 2)
             if rows and rows[-1][2] == result:
                 rows[-1][1] = exam
             else:

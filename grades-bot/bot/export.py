@@ -12,7 +12,7 @@ from .xlsx import Cell, Sheet, build
 
 SUMMARY_HEADER = (
     "Предмет", "За семестр", "Средний", "Оценок", "ОКР", "Работы зачтены",
-    "Курсовой", "Сессия", "Экзамен", "Итог", "Что не так",
+    "Курсовой", "Сессия", "Экзамен", "Прошлые семестры", "Итог", "Что не так",
 )  # fmt: skip
 
 
@@ -61,7 +61,12 @@ async def build_xlsx(repo: Repo, user: User) -> tuple[bytes, str]:
     ov = Overview(views)
     now = clock.now()
 
-    summary = Sheet("Итоги", widths=[24, 11, 10, 8, 8, 15, 11, 11, 9, 18, 55])
+    summary = Sheet("Итоги", widths=[24, 11, 10, 8, 8, 15, 11, 11, 9, 17, 18, 55])
+
+    def note_row(label: str, value: float | None, note: str, bold: bool = False) -> None:
+        """Строка под таблицей: подпись, число под «За семестр» и пояснение в последней колонке."""
+        summary.add(label, value, *([None] * (len(SUMMARY_HEADER) - 3)), note, bold=bold)
+
     summary.add(f"Оценки — {title}", bold=True)
     summary.add(f"выгружено {fmt_date(now, user.tz, with_year=True)}")
     summary.add()
@@ -77,21 +82,18 @@ async def build_xlsx(repo: Repo, user: User) -> tuple[bytes, str]:
             _project(v),
             CONTROL_LABEL[v.control] if v.has_session else None,
             _exam(v),
+            ", ".join(map(str, v.previous)) or None,
             _final(v),
             "; ".join(v.reasons()),
         )
     summary.add()
     if ov.avg is not None:
         marks = ov.marks
-        summary.add(
-            "Средний балл", ov.avg, None, None, None, None, None, None, None, None,
-            f"= {sum(marks)} / {len(marks)}: среднее отметок по предметам, как в ведомости",
+        note_row(
+            "Средний балл", ov.avg, f"= {sum(marks)} / {len(marks)}: среднее отметок по предметам, как в ведомости",
             bold=True,
         )  # fmt: skip
-        summary.add(
-            "Без округления", ov.avg_exact, None, None, None, None, None, None, None, None,
-            "среднее точных значений за семестр (столбец «Средний»)",
-        )  # fmt: skip
+        note_row("Без округления", ov.avg_exact, "среднее точных значений за семестр (столбец «Средний»)")
     if ov.session_avg is not None:
         summary.add("Средний балл сессии", ov.session_avg)
 

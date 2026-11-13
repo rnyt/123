@@ -664,6 +664,17 @@ def _exam_lines(user: User, v: SubjectView) -> list[str]:
     return [f"{icon} {label}: <b>{exam}</b>"]
 
 
+def course_line(v: SubjectView) -> str:
+    """«📚 Прошлые семестры: 7 · вместе: (7 + 8) / 2 = 7,50 → 8» — предмет идёт несколько семестров."""
+    past = ", ".join(map(str, v.previous))
+    marks = v.course_marks
+    if not marks:
+        return f"📚 Прошлые семестры: {past} — сложатся с отметкой за этот семестр"
+    terms = " + ".join(map(str, marks))
+    together = f"({terms}) / {len(marks)} = {fmt_num(v.course_exact)} → <b>{v.base_grade}</b>"
+    return f"📚 Прошлые семестры: {past} · вместе: {together}"
+
+
 def _table_cell(lo: int, hi: int, result: int) -> str:
     return f"{lo}→{result}" if lo == hi else f"{lo}–{hi}→{result}"
 
@@ -706,6 +717,8 @@ def render_subject(user: User, v: SubjectView, notice: str | None, top_rows: Seq
     lines = [subject_title(v)]
     if v.has_session:
         lines.append(f"<i>{CONTROL_ICON[v.control]} В сессию: {CONTROL_LABEL[v.control]}</i>")
+    elif v.previous:
+        lines.append("<i>Идёт несколько семестров — итог: среднее отметок за все семестры (п. 24)</i>")
     elif v.subject.okr_count == 0:
         lines.append("<i>Без экзамена и ОКР — итог: отметка за семестр</i>")
     else:
@@ -719,6 +732,8 @@ def render_subject(user: User, v: SubjectView, notice: str | None, top_rows: Seq
         )
         if v.formula:
             lines.append(f"🧮 {esc(v.formula)}")
+    if v.previous:
+        lines.append(course_line(v))
     if v.regular:
         lines.append("📝 " + grades_line([g.value for g in v.regular]))
     lines += _okr_lines(user, v)
@@ -1008,6 +1023,7 @@ async def subject_settings_screen(repo: Repo, user: User, sid: int, notice: str 
         f"📌 ОКР: <b>{s.okr_count if s.okr_count else 'нет'}</b>",
         f"📐 Курсовой проект: <b>{'есть' if s.project else 'нет'}</b>",
         f"🏷 Сокращение: <b>{esc(s.short) if s.short else 'нет'}</b>",
+        f"📚 Прошлые семестры: <b>{', '.join(map(str, v.previous)) if v.previous else 'нет — первый семестр'}</b>",
     ]
     if user.calc_mode == CALC_SSO:
         lines.append(f"📚 Предмет: {kind}")
@@ -1029,6 +1045,7 @@ async def subject_settings_screen(repo: Repo, user: User, sid: int, notice: str 
     )
     rows.append([btn(f"📐 Курсовой: {'есть ✅' if s.project else 'нет'}", Subj(a="prj", id=sid))])
     rows.append([btn("🏷 Сокращение", Subj(a="short", id=sid)), btn("✏️ Переименовать", Subj(a="ren", id=sid))])
+    rows.append([btn("📚 Отметки за прошлые семестры", Subj(a="prev", id=sid))])
     if user.calc_mode == CALC_SSO:
         rows.append([btn(f"📚 Общеобразовательный: {'да ✅' if s.general else 'нет'}", Subj(a="gen", id=sid))])
     rows.append([btn("⬆️ Выше", Subj(a="up", id=sid)), btn("⬇️ Ниже", Subj(a="down", id=sid))])

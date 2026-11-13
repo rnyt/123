@@ -19,6 +19,7 @@ from ..logic import (
     fmt_num,
     norm,
     parse_grades,
+    parse_marks,
     plural,
 )
 from ..models import CONTROL_LABEL, CONTROLS, Subject
@@ -651,3 +652,54 @@ async def short_text(message: Message, ctx: Ctx) -> None:
     await ctx.repo.update_subject(ctx.user, subject.id, short=short)
     notice = f"🏷 Сокращение: «{esc(short)}»." if short else "🏷 Сокращение убрано."
     await _show_settings(message, ctx, subject.id, notice)
+
+
+# ---------------------------------------------------------------- прошлые семестры (предмет идёт несколько семестров)
+
+PREV_TITLE = "📚 <b>Отметки за прошлые семестры</b>"
+MAX_PREVIOUS = 7  # больше семестров в колледже не бывает
+
+
+def _prev_body(subject: Subject) -> str:
+    marks = parse_marks(subject.prev_marks)
+    current = f"Сейчас: {', '.join(map(str, marks))}.\n" if marks else ""
+    return (
+        f"{current}Если предмет идёт не первый семестр, отправь отметки за прошлые семестры — через пробел, "
+        "например <code>7</code> или <code>7 8</code>.\n"
+        "Они сложатся с отметкой за этот семестр, а экзамен — уже с общей отметкой. "
+        "Убрать — отправь <code>-</code>"
+    )
+
+
+@router.callback_query(Subj.filter(F.a == "prev"))
+async def prev_prompt(cq: CallbackQuery, callback_data: Subj, ctx: Ctx) -> None:
+    subject = await _subject(cq, ctx, callback_data.id)
+    if subject is None:
+        return
+    await ctx.mode(Inp.prev, sid=subject.id)
+    await ctx.show(cq, screens.prompt_screen(PREV_TITLE, _prev_body(subject), Subj(a="cfg", id=subject.id)))
+
+
+@router.message(Inp.prev, F.text)
+async def prev_text(message: Message, ctx: Ctx) -> None:
+    data = await ctx.data()
+    subject = await ctx.repo.get_subject(ctx.user, data.get("sid", 0))
+    if subject is None:
+        await go_main(message, ctx, notice=NOT_FOUND)
+        return
+    text = (message.text or "").strip()
+    if text.lower() in {"-", "—", "нет", "убрать"}:
+        await ctx.repo.update_subject(ctx.user, subject.id, prev_marks=None)
+        await _show_settings(message, ctx, subject.id, "📚 Отметки за прошлые семестры убраны.")
+        return
+    marks, bad = parse_grades(text, 1, ctx.user.scale)
+    if bad or not marks or len(marks) > MAX_PREVIOUS:
+        problem = f"⚠️ Не понял: {esc(', '.join(bad))}." if bad else f"⚠️ Нужно от 1 до {MAX_PREVIOUS} отметок."
+        await ctx.show(
+            message, screens.prompt_screen(PREV_TITLE, _prev_body(subject), Subj(a="cfg", id=subject.id), problem)
+        )
+        return
+    await ctx.repo.update_subject(ctx.user, subject.id, prev_marks=" ".join(map(str, marks)))
+    await _show_settings(
+        message, ctx, subject.id, f"📚 Прошлые семестры: {', '.join(map(str, marks))} — войдут в итог по предмету."
+    )

@@ -637,7 +637,7 @@ async def test_export_xlsx(env) -> None:
     rows = {r[0]: r for r in summary if r}
     assert rows["Физика"][:8] == ["Физика", 8, 7.75, 3, 7, None, None, "экзамен"]
     assert rows["Средний балл"][1] == 7.5  # (8 + 7) / 2: отметки за семестр по физике и программированию
-    assert rows["Средний балл"][10].startswith("= 15 / 2")
+    assert rows["Средний балл"][-1].startswith("= 15 / 2")
     assert rows["Без округления"][1] == pytest.approx(7.125)  # (7,75 + 6,5) / 2
     assert ["Физика", "ОКР", 7] in [r[:3] for r in grades]
     assert c.panel.id > doc.id
@@ -838,3 +838,64 @@ def test_all_buttons_fit_telegram_limit() -> None:
     ):
         InlineKeyboardButton(text="x", callback_data=data.pack())
         assert len(data.pack().encode()) <= 64
+
+
+# ---------------------------------------------------------------- предмет на несколько семестров (п. 24)
+
+NO_OKR = ("Английский", "Физика", "Программирование", "Высшая")
+
+
+async def archive_and(c: Client, then: str) -> None:
+    await c.send("/archive")
+    await c.press("Отправить текущий семестр в архив")
+    await c.press("Да, в архив")
+    await c.press(then)
+
+
+async def test_subject_continues_next_semester(env) -> None:
+    """Отметка за 1-й семестр сохраняется, оценки начинаются заново, экзамен — с общей отметкой."""
+    c = env.client
+    await onboard(c, course="1 курс", no_okr=NO_OKR, exams={"Физика": 1})
+    await c.send("физ 7 7 8")  # 7,33 → 7
+    await archive_and(c, "Перенести список")
+    assert "оценки начнутся заново" in c.text
+    assert "📚 Отметки за прошлый семестр сохранены: Физика (7)" in c.text
+    await c.send("физ")
+    assert "📚 Прошлые семестры: 7 — сложатся с отметкой за этот семестр" in c.text and "Оценок пока нет" in c.text
+    await c.send("физ 9 8")  # 8,5 → 9
+    await c.send("физ")
+    assert "📚 Прошлые семестры: 7 · вместе: (7 + 9) / 2 = 8,00 → <b>8</b>" in c.text
+    assert "Итог при отметке: 3–4→6 · 5–6→7 · 7–8→8 · 9–10→9" in c.text  # от общей отметки 8
+    await c.press("Экзамен")
+    await c.press("10", exact=True)
+    assert "→ итог <b>9</b> ((8 + 10) / 2 = 9,0)" in c.text
+
+
+async def test_previous_semesters_entered_by_hand(env) -> None:
+    c = env.client
+    await onboard(c, no_okr=NO_OKR)
+    await c.send("физ 9")
+    await c.send("физ")
+    await c.press("⚙️ Предмет")
+    assert "📚 Прошлые семестры: <b>нет — первый семестр</b>" in c.text
+    await c.press("Отметки за прошлые семестры")
+    await c.send("abc")
+    assert "Не понял: abc" in c.text
+    await c.send("6 7")
+    assert "📚 Прошлые семестры: <b>6, 7</b>" in c.text
+    await c.press("⬅️ Назад")
+    assert "Идёт несколько семестров" in c.text and "(6 + 7 + 9) / 3 = 7,33 → <b>7</b>" in c.text
+    await c.press("⚙️ Предмет")
+    await c.press("Отметки за прошлые семестры")
+    await c.send("-")
+    assert "📚 Прошлые семестры: <b>нет — первый семестр</b>" in c.text
+
+
+async def test_same_subject_typed_in_new_semester_continues(env) -> None:
+    c = env.client
+    await onboard(c, course="1 курс", no_okr=NO_OKR)
+    await c.send("физ 8")
+    await archive_and(c, "Ввести предметы")
+    await c.send("Физика, Химия")
+    assert "✅ Добавлено: Физика, Химия" in c.text
+    assert "📚 Отметки за прошлый семестр сохранены: Физика (8)" in c.text

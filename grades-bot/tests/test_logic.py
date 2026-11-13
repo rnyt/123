@@ -15,6 +15,7 @@ from bot.logic import (
     next_goal,
     parse_grades,
     parse_hhmm,
+    parse_marks,
     parse_quick,
     parse_subject_entry,
     parse_tz,
@@ -558,3 +559,24 @@ def test_average_uses_final_mark_after_exam() -> None:
     plain = SubjectView(subj(2, "B", okr=0), [grade(6)], [], 3, 10)
     assert exam.mark == 9  # (7 + 10) / 2 = 8,5 → 9
     assert Overview([exam, plain]).avg == 7.5
+
+
+def test_subject_over_several_semesters() -> None:
+    """п. 24: предмет идёт два семестра — отметки за семестры складываются, экзамен — с общей отметкой."""
+    view = SubjectView(subj(1, "ТОЭ", okr=0, control=EXAM, prev_marks="7"), [grade(9), grade(8, gid=2)], [], 3, 10)
+    assert view.previous == [7] and view.semester_grade == 9  # 8,5 → 9 в этом семестре
+    assert view.course_marks == [7, 9] and view.base_grade == 8  # (7 + 9) / 2 = 8
+    assert view.exam_table()[0] == (3, 4, 6)  # экзамен 3–4 → (8 + 3..4) / 2 → 6: считается от общей отметки
+    with_exam = SubjectView(
+        subj(1, "ТОЭ", okr=0, control=EXAM, prev_marks="7", exam_grade=10), [grade(9), grade(8, gid=2)], [], 3, 10
+    )
+    assert with_exam.final.value == 9 and with_exam.final.note == "(8 + 10) / 2 = 9,0"  # итог с экзаменом
+    only_exam = SubjectView(
+        subj(1, "ТОЭ", okr=0, control=EXAM, prev_marks="7", exam_grade=10),
+        [grade(9)], [], 3, 10, final_mode=FINAL_EXAM,
+    )  # fmt: skip
+    assert only_exam.final.value == 10  # по п. 24 отметка за экзамен окончательная
+    assert with_exam.carry == "7 9"  # в следующий семестр уходят обе отметки (итог предмета)
+    first = SubjectView(subj(2, "История", okr=0), [grade(6)], [], 3, 10)
+    assert first.previous == [] and first.base_grade == 6 and first.carry == "6"
+    assert parse_marks("7, 8 x") == [7, 8] and parse_marks(None) == []

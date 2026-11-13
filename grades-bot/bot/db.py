@@ -132,6 +132,10 @@ MIGRATIONS: list[str] = [
     -- Порог сдачи в ССО — 3 (п. 4 Правил № 282), а не 4.
     UPDATE users SET pass_mark = 3 WHERE scale = 10 AND pass_mark = 4;
     """,
+    # v3: предмет, который идёт несколько семестров (п. 24 Правил), — отметки за прошлые семестры.
+    """
+    ALTER TABLE subjects ADD COLUMN prev_marks TEXT;  -- «7» или «7 8»; NULL — первый семестр
+    """,
 ]
 
 

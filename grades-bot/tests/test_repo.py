@@ -119,9 +119,10 @@ async def test_semesters_archive_and_copy(repo: Repo) -> None:
     assert user.semester_id == new.id
     assert new.label == "3 курс · 1 семестр"  # после 2-го семестра — следующий курс
     assert await repo.get_subject(user, physics.id) is None  # архив только для чтения
-    assert await repo.copy_subjects(user.id, old_semester, new.id) == 2
+    assert await repo.copy_subjects(user, old_semester, new.id) == 2
     copied = await repo.list_subjects(user.id, new.id)
     assert [(s.name, s.okr_count) for s in copied] == [("Физика", 2), ("Химия", 1)]
+    assert [s.prev_marks for s in copied] == ["9", None]  # отметка за прошлый семестр сохранена, у химии оценок не было
     archived = await repo.views(user, old_semester)
     assert archived[0].values == [9]
 
@@ -187,7 +188,7 @@ async def test_subject_abbreviation_and_session_fields(repo: Repo) -> None:
     assert await repo.max_grade(user) == 10
     copied_to = await repo.start_new_semester(user)
     user = await repo.update_user(user.id)
-    await repo.copy_subjects(user.id, toe.semester_id, copied_to.id)
+    await repo.copy_subjects(user, toe.semester_id, copied_to.id)
     (copy,) = await repo.list_subjects(user.id, copied_to.id)
     assert (copy.short, copy.control, copy.project, copy.exam_grade) == ("ТОЭ", "exam", True, None)
 
@@ -232,3 +233,20 @@ async def test_migration_from_first_version(tmp_path) -> None:
         user = await repo.update_user(1, semester_id=1)
         (view,) = await repo.views(user)
         assert view.values == [8] and view.subject.control == "none"
+
+
+async def test_subject_continues_by_name_after_archive(repo: Repo) -> None:
+    """Предмет с тем же названием в новом семестре — продолжение: отметка за прошлый семестр подтягивается."""
+    user = await new_user(repo)
+    (toe, _), _ = await repo.add_subjects(user, ["Теоретические основы электротехники (ТОЭ)", "История"])
+    assert toe.prev_marks is None  # первый семестр — прошлых отметок нет
+    await repo.add_grades(user, toe.id, [7, 8])  # 7,5 → 8
+    await repo.start_new_semester(user)
+    user = await repo.update_user(user.id)
+    (again, other), _ = await repo.add_subjects(user, ["ТОЭ", "Физика"])
+    assert (again.prev_marks, other.prev_marks) == ("8", None)
+    view = await repo.view(user, again.id)
+    assert view is not None and view.previous == [8] and view.course_marks == []  # оценок в этом семестре ещё нет
+    await repo.add_grades(user, again.id, [9])
+    view = await repo.view(user, again.id)
+    assert view.course_marks == [8, 9] and view.base_grade == 9  # (8 + 9) / 2 = 8,5 → 9

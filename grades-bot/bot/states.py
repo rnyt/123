@@ -21,6 +21,7 @@ class Inp(StatesGroup):
     subjects = State()  # новые предметы
     rename = State()  # новое название предмета (data: sid)
     short = State()  # сокращение предмета (data: sid)
+    prev = State()  # отметки за прошлые семестры (data: sid)
     wrename = State()  # новое название работы (data: sid, wid)
     time = State()  # время напоминаний
     tz = State()  # часовой пояс

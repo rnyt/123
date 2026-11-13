@@ -11,7 +11,7 @@ from ..callbacks import Arch
 from ..context import Ctx
 from ..logic import SUBJECT_FORMS, plural
 from ..states import OnbSt
-from .common import go_main
+from .common import carried_line, go_main
 
 router = Router(name="session")
 
@@ -78,11 +78,12 @@ async def archive_copy(cq: CallbackQuery, callback_data: Arch, ctx: Ctx, callbac
     if callback_data.id == ctx.user.semester_id:
         await go_main(cq, ctx)
         return
-    copied = await ctx.repo.copy_subjects(ctx.user.id, callback_data.id, ctx.user.semester_id or 0)
-    await go_main(
-        cq, ctx,
-        notice=f"📋 Перенёс {plural(copied, SUBJECT_FORMS)} (без оценок). Лишние убери в ⚙️ предмета. Удачи! 🍀",
-    )  # fmt: skip
+    copied = await ctx.repo.copy_subjects(ctx.user, callback_data.id, ctx.user.semester_id or 0)
+    notice = f"📋 Перенёс {plural(copied, SUBJECT_FORMS)} — оценки начнутся заново."
+    carried = carried_line(await ctx.repo.list_subjects(ctx.user.id, ctx.user.semester_id))
+    if carried:
+        notice += "\n" + carried
+    await go_main(cq, ctx, notice=notice + "\nЛишние предметы убери в ⚙️ предмета. Удачи! 🍀")
 
 
 @router.callback_query(Arch.filter(F.a == "fresh"))
