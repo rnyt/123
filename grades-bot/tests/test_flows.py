@@ -635,10 +635,10 @@ async def test_export_xlsx(env) -> None:
     assert summary[0] == ["Оценки — 2 курс · 1 семестр"]
     assert summary[3][:4] == ["Предмет", "За семестр", "Средний", "Оценок"]
     rows = {r[0]: r for r in summary if r}
-    assert rows["Физика"][:8] == ["Физика", 8, 7.75, 3, 7, None, None, "экзамен"]
+    assert rows["Физика"][:8] == ["Физика", 8, 8.0, 3, 7, None, None, "экзамен"]
     assert rows["Средний балл"][1] == 7.5  # (8 + 7) / 2: отметки за семестр по физике и программированию
     assert rows["Средний балл"][-1].startswith("= 15 / 2")
-    assert rows["Без округления"][1] == pytest.approx(7.125)  # (7,75 + 6,5) / 2
+    assert rows["Без округления"][1] == pytest.approx(7.25)  # (8,00 + 6,5) / 2: текущие физики 8,5 -> 9, (ОКР 7 + 9) / 2
     assert ["Физика", "ОКР", 7] in [r[:3] for r in grades]
     assert c.panel.id > doc.id
 

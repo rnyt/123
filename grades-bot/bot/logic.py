@@ -678,7 +678,10 @@ class SubjectView:
         if self.subject.project and self.subject.project_grade is not None:
             result.append(("курсовой", self.subject.project_grade))
         if self.current_avg is not None:
-            result.append(("текущие", self.current_avg))
+            # Если есть ОКР/курсовой, среднее текущих сначала округляется до целой отметки
+            # (6,50 -> 7) и только потом идёт в формулу. Без них — остаётся точным.
+            current = round_half_up(self.current_avg) if result else self.current_avg
+            result.append(("текущие", current))
         return result
 
     @cached_property
@@ -739,7 +742,13 @@ class SubjectView:
         """«(ОКР 8 + курсовой 9 + текущие 7,20) / 3 = 8,07» — когда считается не простым средним."""
         if self.simple or len(self.parts) < 2:
             return None
-        terms = " + ".join(f"{name} {fmt_num(value) if value % 1 else int(value)}" for name, value in self.parts)
+        def term(name: str, value: float) -> str:
+            text = f"{name} {fmt_num(value) if value % 1 else int(value)}"
+            if name == "текущие" and self.current_avg is not None and self.current_avg % 1:
+                text += f" ({fmt_num(self.current_avg)})"
+            return text
+
+        terms = " + ".join(term(name, value) for name, value in self.parts)
         return f"({terms}) / {len(self.parts)} = {fmt_num(self.semester_exact)}"
 
     @cached_property
@@ -750,8 +759,11 @@ class SubjectView:
             return None
         fixed = [value for name, value in self.parts if name != "текущие"]
         target = self.semester_grade + 1
-        need_avg = (target - 0.5) * (len(fixed) + 1) - sum(fixed)
-        return goal_for(self.current, need_avg, self.scale, target)
+        # Нужная целая отметка за текущие, затем — среднее, которое до неё округлится.
+        need_mark = math.ceil((target - 0.5) * (len(fixed) + 1) - sum(fixed) - 1e-9)
+        if need_mark > self.scale:
+            return None
+        return goal_for(self.current, need_mark - 0.5, self.scale, target)
 
     # ------------------------------------------------------------ работы
 

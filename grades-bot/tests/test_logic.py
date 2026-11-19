@@ -580,3 +580,12 @@ def test_subject_over_several_semesters() -> None:
     first = SubjectView(subj(2, "История", okr=0), [grade(6)], [], 3, 10)
     assert first.previous == [] and first.base_grade == 6 and first.carry == "6"
     assert parse_marks("7, 8 x") == [7, 8] and parse_marks(None) == []
+
+
+def test_current_avg_rounded_before_formula() -> None:
+    """Среднее текущих 6,50 округляется до 7, затем (ОКР 8 + 7) / 2 = 7,5 -> 8."""
+    view = make_view([grade(7), grade(3), grade(8), grade(8), grade(8, okr=1, gid=5)])
+    assert view.current_avg == 6.5
+    assert view.semester_exact == 7.5
+    assert view.semester_grade == 8
+    assert view.formula == "(ОКР 8 + текущие 7 (6,50)) / 2 = 7,50"
